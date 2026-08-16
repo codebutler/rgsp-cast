@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_shutdown::ShutdownManager;
 use manager::SessionShutdownReason;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::session::stream::audio::AudioChannels;
 use crate::session::stream::audio::AudioStream;
@@ -10,6 +10,7 @@ use crate::session::stream::audio::AudioStreamContext;
 use crate::session::stream::control::ControlStream;
 use crate::session::stream::control::ControlStreamContext;
 use crate::session::stream::video::EncodedFrame;
+use crate::session::stream::video::EncoderControl;
 use crate::session::stream::video::FrameStats;
 use crate::session::stream::video::HdrModeState;
 use crate::session::stream::video::VideoStream;
@@ -195,6 +196,7 @@ impl LaunchedSession {
 		&self.context
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	pub(crate) async fn start(
 		self,
 		video_config: VideoStreamConfig,
@@ -202,16 +204,9 @@ impl LaunchedSession {
 		video_ctx: VideoStreamContext,
 		audio_ctx: AudioStreamContext,
 		frame_rx: mpsc::Receiver<EncodedFrame>,
+		control_tx: mpsc::Sender<EncoderControl>,
 		stop: ShutdownManager<SessionShutdownReason>,
-	) -> Result<
-		(
-			ActiveSession,
-			Arc<tokio::sync::Notify>,
-			Arc<tokio::sync::Notify>,
-			broadcast::Sender<()>,
-		),
-		(),
-	> {
+	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>), ()> {
 		let Self {
 			context,
 			audio,
@@ -227,10 +222,11 @@ impl LaunchedSession {
 			tracing::error!("Session keys not initialized");
 		})?;
 
-		// Start video stream — gated, returns VideoStreamHandle plus a
-		// clone of the IDR-request sender for callers outside this crate.
-		let (video_handle, idr_request_tx) = video_stream
-			.start(video_config, video_ctx, keys_rx.clone(), frame_rx, stop.clone())
+		// Start video stream — gated, returns VideoStreamHandle. control_tx
+		// carries client recovery requests out to the host, mapped by the
+		// packetize loop.
+		let video_handle = video_stream
+			.start(video_config, video_ctx, keys_rx.clone(), frame_rx, control_tx, stop.clone())
 			.map_err(|()| tracing::error!("Failed to start video stream"))?;
 
 		// Start audio stream — gated, returns AudioStartHandle.
@@ -263,7 +259,6 @@ impl LaunchedSession {
 			},
 			video_start_notify,
 			audio_start_notify,
-			idr_request_tx,
 		))
 	}
 }

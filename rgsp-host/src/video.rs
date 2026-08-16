@@ -46,6 +46,16 @@ pub struct EncodedFrameRef<'a> {
     pub rtp_timestamp: u32,
 }
 
+/// Task 10's wiring for both requesters below: spawn a task that awaits
+/// `moonshine_core::session::manager::SessionManager::encoder_control_receiver()`
+/// (an `mpsc::Receiver<EncoderControl>`, taken once — symmetric with
+/// `video_frame_sender()`) and on each message received, map:
+/// - `EncoderControl::Idr` -> `IdrRequester::request()`
+/// - `EncoderControl::Invalidate { .. }` -> `IdrRequester::request()` too —
+///   Cedar has no reference-invalidation API, so this project degrades a
+///   partial-loss recovery to a full keyframe rather than a cheaper partial
+///   one. The `{first, last}` frame range is intentionally discarded.
+/// - `EncoderControl::Reset` -> `ResetRequester::request()`
 #[derive(Clone)]
 pub struct IdrRequester {
     flag: Arc<AtomicBool>,
@@ -53,13 +63,23 @@ pub struct IdrRequester {
 
 impl IdrRequester {
     /// Flags the next `run()` iteration to call `Capture::request_idr()`.
-    ///
-    /// Task 10's wiring: spawn a task that awaits
-    /// `moonshine_core::session::manager::SessionManager::idr_request_receiver()`
-    /// (a `broadcast::Receiver<()>`, symmetric with `video_frame_sender()`)
-    /// and calls `request()` here on every message received — that's how a
-    /// client-requested keyframe (e.g. after packet loss) reaches the Cedar
-    /// encoder.
+    pub fn request(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+    }
+}
+
+/// See `IdrRequester`'s doc comment for the wiring this pairs with.
+#[derive(Clone)]
+pub struct ResetRequester {
+    flag: Arc<AtomicBool>,
+}
+
+impl ResetRequester {
+    /// Flags the next `run()` iteration to restart the frame counter from
+    /// zero and force an IDR — a resuming client is a fresh Moonlight
+    /// session that expects frame numbers to start at 1; without the reset
+    /// it sees the running counter as a huge frame gap and reports a poor
+    /// connection. It also needs a decodable starting frame, hence the IDR.
     pub fn request(&self) {
         self.flag.store(true, Ordering::Relaxed);
     }
@@ -68,6 +88,7 @@ impl IdrRequester {
 pub struct VideoStream {
     cfg: VideoConfig,
     idr: Arc<AtomicBool>,
+    reset: Arc<AtomicBool>,
 }
 
 impl VideoStream {
@@ -75,12 +96,19 @@ impl VideoStream {
         VideoStream {
             cfg,
             idr: Arc::new(AtomicBool::new(false)),
+            reset: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn idr_requester(&self) -> IdrRequester {
         IdrRequester {
             flag: self.idr.clone(),
+        }
+    }
+
+    pub fn reset_requester(&self) -> ResetRequester {
+        ResetRequester {
+            flag: self.reset.clone(),
         }
     }
 
@@ -117,7 +145,10 @@ impl VideoStream {
         let mut frame_number: u64 = 0;
 
         loop {
-            if self.idr.swap(false, Ordering::Relaxed) {
+            if self.reset.swap(false, Ordering::Relaxed) {
+                frame_number = 0;
+                capture.request_idr();
+            } else if self.idr.swap(false, Ordering::Relaxed) {
                 capture.request_idr();
             }
 

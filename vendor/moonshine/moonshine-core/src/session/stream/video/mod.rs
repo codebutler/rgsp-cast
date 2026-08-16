@@ -12,7 +12,7 @@ mod host_source;
 pub mod packetizer;
 pub mod shard_batch;
 use gso_socket::UdpGsoSocket;
-pub use host_source::EncodedFrame;
+pub use host_source::{EncodedFrame, EncoderControl};
 use host_source::spawn_packetize_frames;
 use shard_batch::ShardBatch;
 
@@ -333,12 +333,12 @@ impl VideoStream {
 		})
 	}
 
-	/// Returns the started stream's handle plus a clone of the IDR-request
-	/// broadcast sender, so a caller outside this crate can `.subscribe()`
-	/// and forward client-requested keyframes to the host's encoder (e.g.
-	/// `rgsp_host::video::IdrRequester`). Reference-invalidation and reset
-	/// requests are not exposed this way yet — see `VideoStreamHandle`'s
-	/// own methods, which only reach callers inside the crate today.
+	/// `control_tx` carries client recovery requests (IDR / reference
+	/// invalidation / stream reset) out to the host's encoder, mapped to
+	/// `EncoderControl` by the packetize loop — see `host_source`'s module
+	/// docs for why they're collapsed into one channel instead of exposed
+	/// as the three raw broadcast channels `VideoStreamHandle` uses
+	/// internally.
 	#[allow(clippy::too_many_arguments)]
 	pub fn start(
 		self,
@@ -346,8 +346,9 @@ impl VideoStream {
 		context: VideoStreamContext,
 		keys_rx: SessionKeysReceiver,
 		frame_rx: mpsc::Receiver<EncodedFrame>,
+		control_tx: mpsc::Sender<EncoderControl>,
 		stop: ShutdownManager<SessionShutdownReason>,
-	) -> Result<(VideoStreamHandle, broadcast::Sender<()>), ()> {
+	) -> Result<VideoStreamHandle, ()> {
 		// The Vulkan encode pipeline that both encoded frames and packetized
 		// them was removed with the compositor. Encoding now happens outside
 		// the crate (the host's Cedar encoder feeds `frame_rx`); packetizing
@@ -366,18 +367,18 @@ impl VideoStream {
 		// Gate for packetize loop + packet handler.
 		let start_notify = Arc::new(Notify::new());
 
-		// IDR broadcast channel. A clone of the sender is returned alongside
-		// the handle so a caller outside this crate can subscribe and relay
-		// IDR requests to the host's encoder.
-		let (idr_tx, _idr_rx) = broadcast::channel(1);
-		let idr_tx_for_host = idr_tx.clone();
+		// IDR broadcast channel. Subscribed by both `VideoStreamHandle`
+		// (unused internally beyond bookkeeping) and the packetize loop
+		// below, which is the actual consumer — it maps every message to
+		// `EncoderControl` and forwards it out to the host via `control_tx`.
+		let (idr_tx, idr_rx) = broadcast::channel(1);
 
 		// Reference frame invalidation broadcast channel. Sized for a small burst
-		// of loss reports; the encode loop drains all pending each iteration.
-		let (invalidate_tx, _invalidate_rx) = broadcast::channel(16);
+		// of loss reports; the packetize loop drains all pending each iteration.
+		let (invalidate_tx, invalidate_rx) = broadcast::channel(16);
 
 		// Stream-reset broadcast channel (client reconnect/resume).
-		let (reset_tx, _reset_rx) = broadcast::channel(1);
+		let (reset_tx, reset_rx) = broadcast::channel(1);
 
 		// Packet channel, produced by the packetize loop below and consumed
 		// by the packet handler that owns the socket.
@@ -386,26 +387,30 @@ impl VideoStream {
 		// Spawn packet handler — gated behind start_notify.
 		spawn_handle_video_packets(packet_rx, socket, start_notify.clone(), stop.clone());
 
-		// Spawn packetize loop — gated behind start_notify.
+		// Spawn packetize loop — gated behind start_notify. Also the sole
+		// consumer of idr_rx/invalidate_rx/reset_rx: it maps client
+		// recovery requests to `EncoderControl` and forwards them to the
+		// host via `control_tx`.
 		spawn_packetize_frames(
 			frame_rx,
 			config,
 			context,
 			keys_rx,
 			packet_tx,
+			idr_rx,
+			invalidate_rx,
+			reset_rx,
+			control_tx,
 			start_notify.clone(),
 			stop,
 		);
 
-		Ok((
-			VideoStreamHandle {
-				notify: start_notify,
-				idr_tx,
-				invalidate_tx,
-				reset_tx,
-			},
-			idr_tx_for_host,
-		))
+		Ok(VideoStreamHandle {
+			notify: start_notify,
+			idr_tx,
+			invalidate_tx,
+			reset_tx,
+		})
 	}
 }
 

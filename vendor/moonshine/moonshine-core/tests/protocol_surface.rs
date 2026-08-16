@@ -18,6 +18,8 @@ fn protocol_layer_is_public() {
 	#[allow(unused_imports)]
 	use moonshine_core::session::stream::video::EncodedFrame;
 	#[allow(unused_imports)]
+	use moonshine_core::session::stream::video::EncoderControl;
+	#[allow(unused_imports)]
 	use moonshine_core::session::stream::video::gso_socket::UdpGsoSocket;
 	#[allow(unused_imports)]
 	use moonshine_core::session::stream::video::packetizer::MAX_SHARDS;
@@ -28,7 +30,7 @@ fn protocol_layer_is_public() {
 	// The seam this task added: SessionManager's accessor for the encoded-frame
 	// channel that feeds the video stream's packetize loop.
 	let _ = moonshine_core::session::manager::SessionManager::video_frame_sender;
-	// Symmetric accessor for client-requested IDR frames, reaching the host
-	// encoder from outside the crate.
-	let _ = moonshine_core::session::manager::SessionManager::idr_request_receiver;
+	// Symmetric accessor for client recovery requests (IDR / reference
+	// invalidation / reset), reaching the host encoder from outside the crate.
+	let _ = moonshine_core::session::manager::SessionManager::encoder_control_receiver;
 }
