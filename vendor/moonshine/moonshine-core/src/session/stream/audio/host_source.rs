@@ -40,6 +40,11 @@ pub(crate) const FRAME_FRAMES: usize = (CAPTURE_SAMPLE_RATE / 1000 * FRAME_DURAT
 /// avoid losing an allocation from a previous full `frame_tx`), and only
 /// allocating fresh if both are exhausted. Mirrors the deleted PulseAudio
 /// server's `clock_tick`, whose contract this replaces.
+///
+/// Normalizes by dividing by `i16::MAX` (32767), the conventional approach:
+/// symmetric divisor, no branch. This means `i16::MIN` (-32768) maps to
+/// slightly more negative than -1.0 (~-1.0000305) rather than exactly -1.0 —
+/// negligible in practice, and matches what most PCM-to-float converters do.
 fn build_frame(
 	pcm: &[i16],
 	frame_recycle_rx: &crossbeam_channel::Receiver<AudioFrame>,
@@ -82,10 +87,17 @@ fn send_frame(
 	}
 }
 
+/// Whether a PCM chunk is exactly one Opus frame's worth of samples for the
+/// given channel count. A short or long chunk would desync Opus's fixed
+/// 5 ms framing, so anything else must be rejected rather than encoded.
+fn chunk_len_is_valid(pcm: &[i16], expected_samples: usize) -> bool {
+	pcm.len() == expected_samples
+}
+
 /// Bridge host-supplied interleaved i16 PCM into the encoder's `AudioFrame`
 /// channel. `channels` sizes the expected chunk length; chunks of any other
-/// size are dropped with a warning rather than fed to the encoder, since a
-/// short or long frame would desync Opus's fixed 5 ms framing.
+/// size are dropped with a warning rather than fed to the encoder (see
+/// `chunk_len_is_valid`).
 pub(crate) fn spawn_pcm_bridge(
 	mut pcm_rx: mpsc::Receiver<Vec<i16>>,
 	channels: u8,
@@ -114,7 +126,7 @@ pub(crate) fn spawn_pcm_bridge(
 				Err(_) => break,
 			};
 
-			if pcm.len() != expected_samples {
+			if !chunk_len_is_valid(&pcm, expected_samples) {
 				tracing::warn!(
 					"Dropping PCM chunk of {} sample(s), expected {expected_samples}.",
 					pcm.len()
@@ -152,6 +164,26 @@ mod tests {
 	}
 
 	#[test]
+	fn chunk_len_is_valid_accepts_exact_length() {
+		assert!(chunk_len_is_valid(&[0i16; 480], 480));
+	}
+
+	#[test]
+	fn chunk_len_is_valid_rejects_short_chunk() {
+		assert!(!chunk_len_is_valid(&[0i16; 479], 480));
+	}
+
+	#[test]
+	fn chunk_len_is_valid_rejects_long_chunk() {
+		assert!(!chunk_len_is_valid(&[0i16; 481], 480));
+	}
+
+	#[test]
+	fn chunk_len_is_valid_rejects_empty_slice() {
+		assert!(!chunk_len_is_valid(&[], 480));
+	}
+
+	#[test]
 	fn converts_i16_to_normalized_f32() {
 		let (_recycle_tx, recycle_rx) = crossbeam_channel::bounded::<AudioFrame>(1);
 		let mut spare = None;
@@ -160,7 +192,7 @@ mod tests {
 
 		assert_eq!(frame.buf.len(), pcm.len());
 		assert!((frame.buf[0] - 1.0).abs() < 1e-6, "max i16 should normalize to ~1.0");
-		assert!((frame.buf[1] - (-1.0)).abs() < 1e-4, "min i16 should normalize to ~-1.0");
+		assert!((frame.buf[1] - (-1.0)).abs() < 1e-4, "min i16 should normalize to ~-1.0 (see build_frame's doc comment)");
 		assert_eq!(frame.buf[2], 0.0);
 	}
 
