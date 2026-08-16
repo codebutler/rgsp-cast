@@ -3,6 +3,36 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Once;
 
+// Audio routing via ALSA config file manipulation, with on-screen indicator.
+//
+// This module routes audio to the TV's loopback device while casting, then restores
+// the previous routing when done. The routing is implemented by writing an ALSA
+// configuration file. An on-screen indicator is lit via SetAudioSink from NextUI's
+// libmsettings.
+//
+// SetAudioSink Integration Notes
+// ==============================
+//
+// The indicator is driven by SetAudioSink() from libmsettings.so, located at
+// `/mnt/SDCARD/.system/<platform>/lib/libmsettings.so` (h700, tg5040, tg5050).
+//
+// Fixed issues:
+// - libmsettings depends on libtinyalsa.so.1 in the same directory, which is not on
+//   the default loader search path. We preload it with RTLD_GLOBAL before loading
+//   libmsettings.
+// - InitSettings() must be called before any SetAudioSink() call because it maps the
+//   shared memory segment that SetAudioSink dereferences. InitSettings itself does
+//   `sprintf(..., getenv("USERDATA_PATH"))` without NULL checking, so it crashes when
+//   started from boot.d/post-resume.d hooks. We ensure USERDATA_PATH is set first.
+//
+// Known issues:
+// - QuitSettings() is not called on cleanup because it appears to be the cause of an
+//   exit-time crash. The shared-memory segment is owned by NextUI and outlives us; the
+//   kernel unmaps our view on process exit anyway.
+//
+// SetAudioSink is not cosmetic: it calls SetVolume(GetVolume()) → SetRawVolume() +
+// SaveSettings(), which touches the real mixer and persists the setting to msettings.bin.
+
 /// alsa-lib reads $USERDATA_PATH/.asoundrc after /etc/asound.conf and the last
 /// pcm.!default wins, so this file selects the sink. `type plug` so a game
 /// asking for something other than 48 kHz stereo still works.
@@ -236,21 +266,9 @@ fn call_set_audio_sink(lib: *mut libc::c_void, value: i32) {
 }
 
 fn cleanup_libmsettings() {
-    use std::ffi::CStr;
-
     let handle_ptr = LIBMSETTINGS_HANDLE.load(Ordering::Acquire) as *mut libc::c_void;
     if !handle_ptr.is_null() {
         unsafe {
-            // Try to call QuitSettings if it exists to clean up the shared memory mapping.
-            // This is not strictly required (the mapping persists until process exit) but
-            // follows NextUI's own cleanup pattern.
-            let quit_name = CStr::from_bytes_with_nul(b"QuitSettings\0").unwrap();
-            let quit_sym = libc::dlsym(handle_ptr, quit_name.as_ptr());
-            if !quit_sym.is_null() {
-                let quit_func: extern "C" fn() = std::mem::transmute(quit_sym);
-                quit_func();
-            }
-
             libc::dlclose(handle_ptr);
         }
     }
