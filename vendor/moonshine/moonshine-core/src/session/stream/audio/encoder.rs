@@ -8,8 +8,8 @@ use crate::session::SessionKeysReceiver;
 use crate::session::manager::SessionShutdownReason;
 use crate::session::stream::RtpHeader;
 
+use crate::session::stream::audio::AudioFrame;
 use crate::session::stream::audio::OpusStreamConfig;
-use crate::session::stream::audio::pulse_server::AudioFrame;
 
 const NR_DATA_SHARDS: usize = 4;
 const NR_PARITY_SHARDS: usize = 2;

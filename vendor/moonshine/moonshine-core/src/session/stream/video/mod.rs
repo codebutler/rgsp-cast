@@ -5,16 +5,79 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 use crate::session::SessionKeysReceiver;
-use crate::session::compositor::frame::{ExportedFrame, HdrModeState};
 use crate::session::manager::SessionShutdownReason;
 
-mod gso_socket;
-mod packetizer;
-mod pipeline;
-mod shard_batch;
+pub mod gso_socket;
+pub mod packetizer;
+pub mod shard_batch;
 use gso_socket::UdpGsoSocket;
-use pipeline::VideoPipeline;
 use shard_batch::ShardBatch;
+
+/// Static HDR metadata (HDR10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HdrMetadata {
+	/// Mastering display color primaries (CIE 1931 xy, in 0.00002 units).
+	pub display_primaries: [(u16, u16); 3],
+	/// White point (CIE 1931 xy, in 0.00002 units).
+	pub white_point: (u16, u16),
+	/// Maximum luminance in 0.0001 cd/m² units.
+	pub max_luminance: u32,
+	/// Minimum luminance in 0.0001 cd/m² units.
+	pub min_luminance: u32,
+	/// Maximum content light level in cd/m² (nits).
+	pub max_cll: u16,
+	/// Maximum frame-average light level in cd/m² (nits).
+	pub max_fall: u16,
+}
+
+/// HDR mode state sent from the video pipeline to the control stream.
+///
+/// Combines the `enabled` flag (whether the client should be in HDR mode)
+/// with optional HDR metadata. The `enabled` flag toggles based on actual
+/// frame content — SDR frames set it to false, HDR frames set it to true.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HdrModeState {
+	/// Whether the client's display should be in HDR mode.
+	pub enabled: bool,
+	/// HDR10 static metadata from the composited content.
+	pub metadata: Option<HdrMetadata>,
+}
+
+impl HdrModeState {
+	/// Create an initial HDR mode state with the given enabled flag.
+	/// Metadata is `None` until the video pipeline provides it.
+	pub fn new(enabled: bool) -> Self {
+		Self {
+			enabled,
+			metadata: None,
+		}
+	}
+}
+
+impl HdrMetadata {
+	/// Reasonable fallback metadata for HDR10 when applications don't provide
+	/// their own. Uses BT.2020 primaries, D65 white point, and a conservative
+	/// 1000 nit peak luminance.
+	pub fn fallback() -> Self {
+		Self {
+			// BT.2020 display primaries in 0.00002 units.
+			display_primaries: [
+				(34000, 16000), // Red:   0.680, 0.320
+				(13250, 34500), // Green: 0.265, 0.690
+				(7500, 3000),   // Blue:  0.150, 0.060
+			],
+			// D65 white point in 0.00002 units.
+			white_point: (15635, 16450), // 0.3127, 0.3290
+			// 1000 nits max luminance in 0.0001 cd/m².
+			max_luminance: 10_000_000,
+			// 0.001 nits min luminance in 0.0001 cd/m².
+			min_luminance: 10,
+			// Unknown content light levels.
+			max_cll: 0,
+			max_fall: 0,
+		}
+	}
+}
 
 /// Configuration for the video stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -237,7 +300,6 @@ impl VideoStreamHandle {
 
 pub(crate) struct VideoStream {
 	socket: UdpGsoSocket,
-	frame_rx: std::sync::mpsc::Receiver<ExportedFrame>,
 	hdr_metadata_tx: watch::Sender<HdrModeState>,
 	stats_tx: tokio::sync::broadcast::Sender<FrameStats>,
 }
@@ -246,7 +308,6 @@ impl VideoStream {
 	pub async fn new(
 		config: VideoStreamConfig,
 		address: String,
-		frame_rx: std::sync::mpsc::Receiver<ExportedFrame>,
 		hdr_metadata_tx: watch::Sender<HdrModeState>,
 		_stop: ShutdownManager<SessionShutdownReason>,
 		stats_tx: tokio::sync::broadcast::Sender<FrameStats>,
@@ -264,7 +325,6 @@ impl VideoStream {
 
 		Ok(Self {
 			socket,
-			frame_rx,
 			hdr_metadata_tx,
 			stats_tx,
 		})
@@ -273,16 +333,18 @@ impl VideoStream {
 	#[allow(clippy::too_many_arguments)]
 	pub fn start(
 		self,
-		config: VideoStreamConfig,
+		_config: VideoStreamConfig,
 		context: VideoStreamContext,
-		keys_rx: SessionKeysReceiver,
+		_keys_rx: SessionKeysReceiver,
 		stop: ShutdownManager<SessionShutdownReason>,
 	) -> Result<VideoStreamHandle, ()> {
+		// The Vulkan encode pipeline that produced `ShardBatch`es, consumed the
+		// compositor frames and published HDR metadata was removed with the
+		// compositor; the host binary supplies encoded frames instead.
 		let Self {
 			socket,
-			frame_rx,
-			hdr_metadata_tx,
-			stats_tx,
+			hdr_metadata_tx: _hdr_metadata_tx,
+			stats_tx: _stats_tx,
 		} = self;
 
 		// Apply QoS to UDP socket.
@@ -303,28 +365,12 @@ impl VideoStream {
 		// Stream-reset broadcast channel (client reconnect/resume).
 		let (reset_tx, _reset_rx) = broadcast::channel(1);
 
-		// Packet channel.
-		let (packet_tx, packet_rx) = mpsc::channel::<ShardBatch>(128);
+		// Packet channel. The producer side has no in-crate owner now that the
+		// Vulkan pipeline is gone.
+		let (_packet_tx, packet_rx) = mpsc::channel::<ShardBatch>(128);
 
 		// Spawn packet handler — gated behind start_notify.
 		spawn_handle_video_packets(packet_rx, socket, start_notify.clone(), stop.clone());
-
-		// Spawn pipeline thread — gated behind start_notify.
-		VideoPipeline::new(
-			frame_rx,
-			config,
-			context,
-			keys_rx,
-			packet_tx,
-			idr_tx.subscribe(),
-			invalidate_tx.subscribe(),
-			reset_tx.subscribe(),
-			stop.clone(),
-			hdr_metadata_tx,
-			start_notify.clone(),
-			stats_tx,
-		)
-		.map_err(|()| tracing::error!("Failed to create video pipeline"))?;
 
 		Ok(VideoStreamHandle {
 			notify: start_notify,

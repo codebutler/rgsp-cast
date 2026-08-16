@@ -1,6 +1,7 @@
 use crate::session::stream::control::ControlMessageType;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum FeedbackCommand {
 	Rumble(RumbleCommand),
 	SetLed(SetLedCommand),

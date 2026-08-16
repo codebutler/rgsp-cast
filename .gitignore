@@ -8,3 +8,4 @@ librgspcast.a
 *.mp4
 *.log
 .DS_Store
+vendor/moonshine/moonshine-core/Cargo.lock

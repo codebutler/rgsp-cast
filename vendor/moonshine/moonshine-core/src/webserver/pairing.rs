@@ -7,7 +7,6 @@ use hyper::{
 	body::Bytes,
 	header::{self, HeaderValue},
 };
-use notify_rust::Notification;
 use tokio::sync::Notify;
 
 use crate::ShutdownReason;
@@ -170,35 +169,12 @@ async fn get_server_cert(
 		notify
 	};
 
-	// Emit a notification, allowing the user to automatically open the PIN page.
+	// The desktop notification that offered to open the PIN page needed
+	// notify-rust and open; log the URL instead.
 	if let Some(local_address) = local_address {
 		let pin_address = SocketAddr::new(local_address.ip(), http_port);
 		let pin_url = format!("http://{pin_address}/pin?uniqueid={unique_id}");
 		tracing::info!("Waiting for pin to be sent at {pin_url}");
-
-		let _ = std::thread::Builder::new()
-			.name("pin-notification".to_string())
-			.spawn(move || {
-				Notification::new()
-					.appname("Moonshine")
-					.summary("Received pairing request.")
-					.body(&format!("Open {pin_url} to enter the PIN."))
-					.action("default", "default")
-					.action("open", "Enter PIN")
-					.show()
-					.map_err(|e| tracing::warn!("Failed to show PIN notification: {e}"))?
-					.wait_for_action(|action| {
-						if action != "__closed"
-							&& let Err(e) = open::that(&pin_url)
-						{
-							tracing::warn!(
-								"Couldn't open the PIN page automatically ({e}). Open it manually: {pin_url}"
-							);
-						}
-					});
-
-				Ok::<(), ()>(())
-			});
 	}
 
 	tokio::select! {

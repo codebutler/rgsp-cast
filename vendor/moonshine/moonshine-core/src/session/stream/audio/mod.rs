@@ -1,5 +1,3 @@
-use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_shutdown::ShutdownManager;
@@ -13,11 +11,21 @@ use crate::session::SessionKeysReceiver;
 use crate::session::manager::SessionShutdownReason;
 
 use self::encoder::AudioEncoder;
-use self::pulse_server::{CAPTURE_SAMPLE_RATE, PulseServer};
 
-mod buffer;
 mod encoder;
-mod pulse_server;
+
+/// The audio source emits samples at this rate to the encoder.
+pub(crate) const CAPTURE_SAMPLE_RATE: u32 = 48000;
+
+/// A buffer of interleaved f32 samples ready for Opus encoding.
+pub(crate) struct AudioFrame {
+	/// Interleaved f32 samples for the negotiated channel count.
+	pub buf: Vec<f32>,
+
+	/// Capture timestamp in milliseconds since process start.
+	#[allow(dead_code)]
+	pub capture_ts_ms: u64,
+}
 
 /// Configuration for the audio stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,8 +184,7 @@ pub struct AudioStreamContext {
 /// Handle returned by `AudioStream::start` that gates the encoder and packet handler.
 ///
 /// The encoder and packet handler are spawned immediately but block on a `Notify`
-/// until `trigger()` is called. PulseServer starts immediately (it just mixes audio,
-/// no network impact).
+/// until `trigger()` is called.
 pub(crate) struct AudioStartHandle {
 	notify: Arc<Notify>,
 }
@@ -200,8 +207,6 @@ impl AudioStartHandle {
 }
 
 pub(crate) struct AudioStream {
-	pulse_socket: UnixListener,
-	pub pulse_socket_path: PathBuf,
 	udp_socket: tokio::net::UdpSocket,
 	stop: ShutdownManager<SessionShutdownReason>,
 }
@@ -218,30 +223,7 @@ impl AudioStream {
 			.await
 			.map_err(|e| tracing::error!("Failed to bind to UDP socket: {e}"))?;
 
-		// Create the socket directory for the PulseAudio server.
-		let pulse_socket_dir = dirs::runtime_dir()
-			.ok_or_else(|| tracing::error!("Failed to get runtime directory for PulseAudio socket"))?
-			.join("moonshine/pulse");
-		std::fs::create_dir_all(&pulse_socket_dir)
-			.map_err(|e| tracing::error!("Failed to create pulse socket directory: {e}"))?;
-		let pulse_socket_path = pulse_socket_dir.join("native");
-
-		// Remove any stale socket file from a previous session.
-		let _ = std::fs::remove_file(&pulse_socket_path);
-
-		// Bind the PulseAudio socket before launching the application so that
-		// the app can connect as soon as it starts.
-		let pulse_socket = UnixListener::bind(&pulse_socket_path)
-			.map_err(|e| tracing::error!("Failed to bind PulseAudio socket: {e}"))?;
-
-		tracing::debug!("Listening for audio messages on {}", pulse_socket_path.display());
-
-		Ok(AudioStream {
-			pulse_socket,
-			pulse_socket_path,
-			udp_socket,
-			stop,
-		})
+		Ok(AudioStream { udp_socket, stop })
 	}
 
 	pub fn start(self, context: AudioStreamContext, keys_rx: SessionKeysReceiver) -> Result<AudioStartHandle, ()> {
@@ -257,21 +239,11 @@ impl AudioStream {
 		let (packet_tx, packet_rx) = mpsc::channel::<Vec<u8>>(10);
 		spawn_handle_audio_packets(packet_rx, self.udp_socket, start_notify.clone(), self.stop.clone());
 
-		// Create frame channels for PulseServer and encoder communication.
-		let (frame_tx, frame_rx) = crossbeam_channel::bounded(3);
-		let (frame_recycle_tx, frame_recycle_rx) = crossbeam_channel::bounded(3);
-
-		// Spawn PulseServer immediately (no gating — it just mixes audio, no network impact).
-		PulseServer::spawn(
-			self.pulse_socket,
-			self.pulse_socket_path.clone(),
-			context.audio_config.channels as u8,
-			context.packet_duration_ms,
-			frame_tx,
-			frame_recycle_rx,
-			self.stop.clone(),
-		)
-		.map_err(|e| tracing::error!("Failed to create PulseServer: {e}"))?;
+		// Create frame channels for the audio source and encoder communication.
+		// The producer side (`_frame_tx` / `_frame_recycle_rx`) had no in-crate owner
+		// once the PulseAudio server was removed; the host binary supplies the samples.
+		let (_frame_tx, frame_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
+		let (frame_recycle_tx, _frame_recycle_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
 
 		// Spawn audio encoder — gated behind start_notify.
 		AudioEncoder::spawn(

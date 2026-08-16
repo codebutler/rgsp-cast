@@ -1,12 +1,10 @@
 // TODO: Remove this when a proper error type is implemented for all functions that return `Result<(), ()>`.
 #![allow(clippy::result_unit_err)]
 
-pub mod app_scanner;
 pub mod clients;
 pub mod config;
-pub(crate) mod crypto;
+pub mod crypto;
 pub mod discovery;
-pub mod healthcheck;
 pub mod rtsp;
 pub mod session;
 pub(crate) mod state;

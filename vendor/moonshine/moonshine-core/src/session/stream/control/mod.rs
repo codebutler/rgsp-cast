@@ -7,21 +7,16 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio_enet::{Event, Host, HostConfig, Packet, PacketMode, PeerState};
 
-use self::input::gamepad::GamepadConfig;
-use self::{feedback::FeedbackCommand, input::InputHandler};
+use self::feedback::FeedbackCommand;
 use crate::crypto::{decrypt, encrypt};
 use crate::session::SessionContext;
 use crate::session::SessionKeysReceiver;
-use crate::session::compositor::{
-	frame::{HdrMetadata, HdrModeState},
-	input::CompositorInputEvent,
-};
 use crate::session::manager::SessionShutdownReason;
 use crate::session::stream::audio::AudioStartHandle;
 use crate::session::stream::video::VideoStreamHandle;
+use crate::session::stream::video::{HdrMetadata, HdrModeState};
 
 mod feedback;
-pub(crate) mod input;
 
 /// Configuration for the control stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,17 +24,11 @@ pub(crate) mod input;
 pub struct ControlStreamConfig {
 	/// Port to use for streaming control data.
 	pub port: u16,
-
-	/// Configuration for gamepad input remapping (e.g. hold-to-Home).
-	pub gamepad: GamepadConfig,
 }
 
 impl Default for ControlStreamConfig {
 	fn default() -> Self {
-		Self {
-			port: 47999,
-			gamepad: GamepadConfig::default(),
-		}
+		Self { port: 47999 }
 	}
 }
 
@@ -280,7 +269,6 @@ impl ControlStreamContext {
 
 pub(crate) struct ControlStream {
 	stop: ShutdownManager<SessionShutdownReason>,
-	input_handler: InputHandler,
 	host: Host,
 }
 
@@ -288,11 +276,8 @@ impl ControlStream {
 	pub fn new(
 		config: ControlStreamConfig,
 		address: String,
-		input_tx: calloop::channel::Sender<CompositorInputEvent>,
 		stop_session_manager: ShutdownManager<SessionShutdownReason>,
 	) -> Result<Self, ()> {
-		let input_handler = InputHandler::new(input_tx, stop_session_manager.clone(), config.gamepad.clone())?;
-
 		let socket_address = SocketAddr::new(
 			address
 				.parse()
@@ -313,7 +298,6 @@ impl ControlStream {
 
 		Ok(Self {
 			stop: stop_session_manager,
-			input_handler,
 			host,
 		})
 	}
@@ -328,7 +312,6 @@ impl ControlStream {
 	) {
 		let Self {
 			stop: stop_session_manager,
-			input_handler,
 			host,
 		} = self;
 
@@ -339,7 +322,6 @@ impl ControlStream {
 				video_handle,
 				audio_trigger,
 				context,
-				input_handler,
 				stop_session_manager,
 				hdr_metadata_rx,
 			)
@@ -453,7 +435,6 @@ async fn run_control_loop(
 	video_handle: VideoStreamHandle,
 	audio_trigger: AudioStartHandle,
 	context: ControlStreamContext,
-	input_handler: InputHandler,
 	stop_session_manager: ShutdownManager<SessionShutdownReason>,
 	mut hdr_metadata_rx: watch::Receiver<HdrModeState>,
 ) {
@@ -464,7 +445,7 @@ async fn run_control_loop(
 	let mut stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(stream_timeout);
 
 	// Create a channel over which we can receive feedback messages to send to the connected client.
-	let (feedback_tx, mut feedback_rx) = mpsc::channel::<FeedbackCommand>(10);
+	let (_feedback_tx, mut feedback_rx) = mpsc::channel::<FeedbackCommand>(10);
 
 	// Sequence number of feedback messages.
 	let mut sequence_number = 0u32;
@@ -567,8 +548,8 @@ async fn run_control_loop(
 					ControlMessage::Ping => {
 						stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(stream_timeout);
 					},
-					ControlMessage::InputData(event) => {
-						let _ = input_handler.handle_raw_input(event, feedback_tx.clone()).await;
+					ControlMessage::InputData(_event) => {
+						tracing::trace!("Skipped input data control message.");
 					},
 					ControlMessage::HdrMode => {
 						tracing::info!("Received HdrMode toggle from client");

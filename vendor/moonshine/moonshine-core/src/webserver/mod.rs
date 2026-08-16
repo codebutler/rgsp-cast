@@ -15,8 +15,6 @@ use hyper::{
 	service::service_fn,
 };
 use hyper_util::rt::tokio::TokioIo;
-use image::ImageFormat;
-use image::imageops::FilterType;
 use network_interface::NetworkInterfaceConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -510,28 +508,10 @@ impl Webserver {
 			},
 		};
 
-		let asset = match image::load_from_memory(&image_bytes) {
-			Ok(asset) => asset,
-			Err(e) => {
-				let message = format!("Failed to load boxart at '{}': {e}", boxart_path.display());
-				tracing::warn!("{message}");
-				return bad_request(message);
-			},
-		};
-
-		// Moonlight displays box art at a fixed 200x267 pixel area using stretch mode.
-		// Icons that don't match this ratio (e.g. square desktop icons) get distorted.
-		// Fit the image into a 600x801 canvas (same ratio as 200:267), preserving aspect ratio, centered.
-		let asset = fit_to_boxart(asset);
-
-		let mut buffer = std::io::Cursor::new(vec![]);
-		if let Err(e) = asset.write_to(&mut buffer, ImageFormat::Png) {
-			let message = format!("Failed to encode boxart: {e}");
-			tracing::warn!("{message}");
-			return bad_request(message);
-		}
-
-		let mut response = Response::new(Full::new(Bytes::from(buffer.into_inner())));
+		// Served verbatim: the decode/rescale step needed the `image` crate.
+		// Moonlight displays box art at a fixed 200x267 pixel area using stretch
+		// mode, so supply a PNG with that aspect ratio (e.g. 600x801).
+		let mut response = Response::new(Full::new(Bytes::from(image_bytes)));
 		response
 			.headers_mut()
 			.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
@@ -792,19 +772,15 @@ impl Webserver {
 		let hdr_mode: u32 = params.remove("hdrMode").and_then(|s| s.parse().ok()).unwrap_or(0);
 		let hdr = hdr_mode != 0;
 
-		let application = match self.applications.iter().find(|&a| a.id() == application_id) {
-			Some(application) => application,
-			None => {
-				let message = format!("Couldn't find application with ID {}.", application_id - 1);
-				tracing::warn!("{message}");
-				return xml_error(400, &message);
-			},
-		};
+		if !self.applications.iter().any(|a| a.id() == application_id) {
+			let message = format!("Couldn't find application with ID {}.", application_id - 1);
+			tracing::warn!("{message}");
+			return xml_error(400, &message);
+		}
 
 		let initialize_result = self
 			.session_manager
 			.initialize_session(SessionContext {
-				application: application.clone(),
 				application_id,
 				resolution: (width, height),
 				refresh_rate,
@@ -1047,34 +1023,6 @@ fn xml_error(status_code: u16, message: &str) -> Response<Full<Bytes>> {
 			bad_request("Failed to build error response.".to_string())
 		},
 	}
-}
-
-const BOXART_WIDTH: u32 = 600;
-const BOXART_HEIGHT: u32 = 801;
-
-fn fit_to_boxart(asset: image::DynamicImage) -> image::DynamicImage {
-	let (w, h) = (asset.width(), asset.height());
-
-	// Already the right aspect ratio (within a small tolerance), return as-is.
-	let target_ratio = BOXART_WIDTH as f64 / BOXART_HEIGHT as f64;
-	let image_ratio = w as f64 / h as f64;
-	if (image_ratio - target_ratio).abs() < 0.01 {
-		return asset;
-	}
-
-	// Scale the image to fit within the box art dimensions while preserving aspect ratio.
-	let scale = f64::min(BOXART_WIDTH as f64 / w as f64, BOXART_HEIGHT as f64 / h as f64);
-	let new_w = (w as f64 * scale).round() as u32;
-	let new_h = (h as f64 * scale).round() as u32;
-	let resized = asset.resize_exact(new_w, new_h, FilterType::Lanczos3);
-
-	// Center the resized image on a transparent canvas.
-	let mut canvas = image::RgbaImage::new(BOXART_WIDTH, BOXART_HEIGHT);
-	let offset_x = (BOXART_WIDTH - new_w) / 2;
-	let offset_y = (BOXART_HEIGHT - new_h) / 2;
-	image::imageops::overlay(&mut canvas, &resized.to_rgba8(), offset_x as i64, offset_y as i64);
-
-	image::DynamicImage::ImageRgba8(canvas)
 }
 
 fn unauthorized(message: &str) -> Response<Full<Bytes>> {

@@ -11,7 +11,6 @@ use crate::session::SessionKeyData;
 use crate::session::SessionKeys;
 use crate::session::SessionKeysSender;
 use crate::session::SessionState;
-use crate::session::compositor::CompositorConfig;
 use crate::session::stream::audio::AudioStreamConfig;
 use crate::session::stream::audio::AudioStreamContext;
 use crate::session::stream::control::ControlStreamConfig;
@@ -26,30 +25,19 @@ pub enum SessionShutdownReason {
 	ManagerShutdown,
 	/// The session was stopped by the user.
 	UserStopped,
-	/// The launched application exited.
-	ApplicationStopped,
 	/// Video packet handler stopped unexpectedly.
 	VideoPacketHandlerStopped,
 	/// Video encoder stopped unexpectedly.
 	VideoEncoderStopped,
 	/// Audio packet handler stopped unexpectedly.
 	AudioPacketHandlerStopped,
-	/// PulseAudio server stopped unexpectedly.
-	PulseServerStopped,
 	/// Audio encoder stopped unexpectedly.
 	AudioEncoderStopped,
 	/// Control stream stopped unexpectedly.
 	ControlStreamStopped,
-	/// Input handler stopped unexpectedly.
-	InputHandlerStopped,
-	/// Compositor stopped unexpectedly.
-	CompositorStopped,
 }
 
 struct SessionManagerInner {
-	/// Configuration for the compositor.
-	compositor_config: CompositorConfig,
-
 	/// Configuration for the video stream.
 	video_config: VideoStreamConfig,
 
@@ -65,8 +53,6 @@ struct SessionManagerInner {
 	/// Time in seconds since last ping after which the stream closes.
 	stream_timeout: u64,
 
-	/// Whether to inhibit system sleep while a session is active.
-	inhibit_sleep: bool,
 
 	/// The currently active session, if any.
 	session: Option<SessionState>,
@@ -149,13 +135,11 @@ pub struct SessionManager {
 impl SessionManager {
 	#[allow(clippy::too_many_arguments)]
 	pub fn new(
-		compositor_config: CompositorConfig,
 		video_config: VideoStreamConfig,
 		audio_config: AudioStreamConfig,
 		control_config: ControlStreamConfig,
 		address: String,
 		stream_timeout: u64,
-		inhibit_sleep: bool,
 		shutdown: ShutdownManager<ShutdownReason>,
 	) -> Result<Self, ()> {
 		let trigger_token = shutdown.trigger_shutdown_token(ShutdownReason::SessionManagerShutdown);
@@ -164,13 +148,11 @@ impl SessionManager {
 		})?;
 
 		let inner = SessionManagerInner {
-			compositor_config,
 			video_config,
 			audio_config,
 			control_config,
 			address,
 			stream_timeout,
-			inhibit_sleep,
 			session: None,
 			stop: ShutdownManager::new(),
 			keys_tx: None,
@@ -281,7 +263,6 @@ impl SessionManager {
 		let (tx, rx) = watch::channel(session_keys);
 		context.keys = SessionKeys::Rx(rx);
 
-		let compositor_config = guard.compositor_config.clone();
 		let video_config = guard.video_config.clone();
 		let audio_config = guard.audio_config.clone();
 		let control_config = guard.control_config.clone();
@@ -289,7 +270,6 @@ impl SessionManager {
 		let stop = guard.stop.clone();
 		let stats_tx = guard.stats_tx.clone();
 		let session = InitializedSession::new(
-			compositor_config,
 			video_config,
 			audio_config,
 			control_config,
@@ -332,7 +312,7 @@ impl SessionManager {
 			}
 		};
 
-		tracing::info!("Launching session (starting compositor and app).");
+		tracing::info!("Launching session.");
 		match session.launch().await {
 			Ok(launched) => {
 				let mut guard = self.inner.lock().await;
@@ -406,7 +386,6 @@ impl SessionManager {
 				video_stream_context,
 				audio_stream_context,
 				stop,
-				guard.inhibit_sleep,
 			)
 			.await
 		{

@@ -11,7 +11,7 @@ use crate::session::SessionKeysReceiver;
 use crate::session::stream::video::shard_batch::{ShardBatch, ShardBuf};
 
 /// Maximum allowed number of shards in the encoder (data + parity).
-pub(crate) const MAX_SHARDS: usize = 255;
+pub const MAX_SHARDS: usize = 255;
 
 const NV_VIDEO_PACKET_SIZE: usize = 16;
 const RTP_HEADER_SIZE: usize = 12;
@@ -108,7 +108,7 @@ fn copy_header_and_data(
 	}
 }
 
-pub(crate) struct Packetizer {
+pub struct Packetizer {
 	fec_encoders: HashMap<(usize, usize), ReedSolomon>,
 	/// Watch channel for encryption keys — read eagerly per `packetize()` call.
 	keys_rx: SessionKeysReceiver,

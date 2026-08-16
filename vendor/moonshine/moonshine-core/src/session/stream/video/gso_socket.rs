@@ -26,7 +26,7 @@ fn gso_segments_per_send(max_gso_segments: usize, shard_size: usize) -> usize {
 /// and datagram-size caps. Batches exceeding a cap are split into chunks; chunks
 /// the kernel rejects fall back to per-shard sends. Without GSO support, the
 /// socket sends everything per-shard.
-pub(crate) struct UdpGsoSocket {
+pub struct UdpGsoSocket {
 	socket: UdpSocket,
 	udp_state: UdpSocketState,
 }

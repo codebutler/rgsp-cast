@@ -1,35 +1,25 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_shutdown::ShutdownManager;
 use manager::SessionShutdownReason;
 use tokio::sync::watch;
 
-use crate::session::compositor::CompositorConfig;
 use crate::session::stream::audio::AudioChannels;
 use crate::session::stream::audio::AudioStream;
 use crate::session::stream::audio::AudioStreamContext;
 use crate::session::stream::control::ControlStream;
 use crate::session::stream::control::ControlStreamContext;
 use crate::session::stream::video::FrameStats;
+use crate::session::stream::video::HdrModeState;
 use crate::session::stream::video::VideoStream;
 use crate::session::stream::video::VideoStreamContext;
 use crate::session::stream::video::VideoStreamHandle;
 
-use self::application::Application;
-use self::application::ApplicationConfig;
-use self::application::ApplicationContext;
-use self::compositor::Compositor;
-use self::compositor::LaunchedCompositor;
-use self::compositor::frame::HdrModeState;
-use self::inhibit::SleepInhibitor;
 use self::stream::audio::AudioStreamConfig;
 use self::stream::control::ControlStreamConfig;
 use self::stream::video::VideoStreamConfig;
 
 pub mod application;
-pub mod compositor;
-pub mod inhibit;
 pub mod manager;
 pub mod stream;
 
@@ -75,13 +65,10 @@ impl SessionKeys {
 /// Context for a session.
 ///
 /// This is created at launch time and contains all the information about the session
-/// that is needed to start the compositor, application, and streams.
+/// that is needed to start the streams.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct SessionContext {
-	/// Application to launch.
-	pub application: ApplicationConfig,
-
 	/// ID of the application as reported to the client.
 	pub application_id: i32,
 
@@ -100,19 +87,19 @@ pub struct SessionContext {
 	/// Audio channel mask.
 	pub audio_channel_mask: u32,
 
-	/// If true, the compositor will be launched with HDR support.
+	/// If true, the session is launched with HDR support.
 	pub hdr: bool,
 }
 
 /// The state of the session. This enum enforces the session lifecycle:
 ///
-/// 1. `Initialized` — Session created; compositor and app not yet started.
-/// 2. `Launched` — Compositor and app are running; waiting for RTSP negotiation.
+/// 1. `Initialized` — Session created; not yet launched.
+/// 2. `Launched` — Session launched; waiting for RTSP negotiation.
 /// 3. `Active` — Streams are active.
 enum SessionState {
-	/// Session initialized; compositor and app not yet started.
+	/// Session initialized; not yet launched.
 	Initialized(InitializedSession),
-	/// Compositor and app launched; waiting for RTSP PLAY.
+	/// Session launched; waiting for RTSP PLAY.
 	Launched(LaunchedSession),
 	/// Streams active.
 	Active(ActiveSession),
@@ -128,10 +115,9 @@ impl SessionState {
 	}
 }
 
-/// Initialized session state — components created, compositor and app not yet started.
+/// Initialized session state — components created, session not yet launched.
 pub(crate) struct InitializedSession {
 	context: SessionContext,
-	compositor: Compositor,
 	audio_stream: AudioStream,
 	video_stream: VideoStream,
 	control_stream: ControlStream,
@@ -142,7 +128,6 @@ pub(crate) struct InitializedSession {
 impl InitializedSession {
 	#[allow(clippy::too_many_arguments)]
 	pub(crate) async fn new(
-		compositor_config: CompositorConfig,
 		video_config: VideoStreamConfig,
 		audio_config: AudioStreamConfig,
 		control_config: ControlStreamConfig,
@@ -154,23 +139,14 @@ impl InitializedSession {
 		// Create HDR metadata watch channel.
 		let (hdr_metadata_tx, hdr_metadata_rx) = watch::channel(HdrModeState::new(context.hdr));
 
-		// Create compositor, audio stream, video stream, and control stream.
-		let (compositor, handles) = Compositor::new(compositor_config, (&context).into(), stop.clone());
+		// Create audio stream, video stream, and control stream.
 		let audio = AudioStream::new(audio_config, address.clone(), stop.clone()).await?;
-		let video_stream = VideoStream::new(
-			video_config.clone(),
-			address.clone(),
-			handles.frame_rx,
-			hdr_metadata_tx,
-			stop.clone(),
-			stats_tx,
-		)
-		.await?;
-		let control_stream = ControlStream::new(control_config, address, handles.input_tx, stop.clone())?;
+		let video_stream =
+			VideoStream::new(video_config.clone(), address.clone(), hdr_metadata_tx, stop.clone(), stats_tx).await?;
+		let control_stream = ControlStream::new(control_config, address, stop.clone())?;
 
 		Ok(Self {
 			context,
-			compositor,
 			audio_stream: audio,
 			video_stream,
 			control_stream,
@@ -183,49 +159,20 @@ impl InitializedSession {
 		&self.context
 	}
 
-	/// Launch the session — starts the compositor and application, but does not start streams.
+	/// Launch the session, but do not start streams.
 	pub(crate) async fn launch(self) -> Result<LaunchedSession, ()> {
 		let Self {
 			context,
-			compositor,
 			audio_stream: audio,
 			video_stream,
 			control_stream,
 			hdr_metadata_rx,
-			stop,
+			stop: _stop,
 		} = self;
-
-		let launched_compositor = compositor.launch()?;
-		let ready = launched_compositor.ready();
-		let pulse_socket_path = audio.pulse_socket_path.clone();
-
-		let application = Application::spawn(
-			context.application.clone(),
-			ApplicationContext {
-				unit_name: "moonshine-session.service".to_string(),
-				pulse_socket_path,
-				xdisplay: ready.xdisplay,
-				wayland_display: ready.wayland_display.clone(),
-				hdr: ready.hdr,
-				// Populate extra_env with width, height and refreshrate values of the client for e.g. scripting
-				extra_env: HashMap::from([
-					("MOONSHINE_CLIENT_WIDTH".to_string(), context.resolution.0.to_string()),
-					("MOONSHINE_CLIENT_HEIGHT".to_string(), context.resolution.1.to_string()),
-					(
-						"MOONSHINE_CLIENT_FRAMERATE".to_string(),
-						context.refresh_rate.to_string(),
-					),
-				]),
-			},
-			stop,
-		)
-		.await?;
 
 		Ok(LaunchedSession {
 			context,
-			application,
 			video_stream,
-			launched_compositor,
 			audio,
 			control_stream,
 			hdr_metadata_rx,
@@ -233,12 +180,10 @@ impl InitializedSession {
 	}
 }
 
-/// Launched session state — compositor and app running, waiting for RTSP negotiation.
+/// Launched session state — waiting for RTSP negotiation.
 pub(crate) struct LaunchedSession {
 	context: SessionContext,
-	application: Application,
 	video_stream: VideoStream,
-	launched_compositor: LaunchedCompositor,
 	audio: AudioStream,
 	control_stream: ControlStream,
 	hdr_metadata_rx: watch::Receiver<HdrModeState>,
@@ -256,21 +201,16 @@ impl LaunchedSession {
 		video_ctx: VideoStreamContext,
 		audio_ctx: AudioStreamContext,
 		stop: ShutdownManager<SessionShutdownReason>,
-		inhibit_sleep: bool,
 	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>), ()> {
 		let Self {
 			context,
-			launched_compositor,
-			application,
 			audio,
 			video_stream,
 			control_stream,
 			hdr_metadata_rx,
 		} = self;
 
-		// The compositor reports the *effective* HDR: false when HDR was requested
-		// but the GPU fell back to an SDR format.
-		let hdr_effective = launched_compositor.hdr();
+		let hdr_effective = context.hdr;
 
 		// Extract the watch receiver for streams.
 		let keys_rx = context.keys.clone_rx().ok_or_else(|| {
@@ -305,18 +245,10 @@ impl LaunchedSession {
 			hdr_metadata_rx,
 		);
 
-		let sleep_inhibitor = if inhibit_sleep {
-			SleepInhibitor::acquire().await
-		} else {
-			None
-		};
-
 		Ok((
 			ActiveSession {
 				context,
-				_application: application,
 				video_handle: video_handle_for_resume,
-				sleep_inhibitor,
 			},
 			video_start_notify,
 			audio_start_notify,
@@ -327,11 +259,7 @@ impl LaunchedSession {
 /// Active session state — streams are active.
 pub(crate) struct ActiveSession {
 	context: SessionContext,
-	_application: Application,
 	video_handle: VideoStreamHandle,
-	/// Held while the session is active to keep the host awake; dropped on teardown.
-	#[allow(dead_code)]
-	sleep_inhibitor: Option<SleepInhibitor>,
 }
 
 impl ActiveSession {

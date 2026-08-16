@@ -7,7 +7,7 @@ use aes_gcm::{
 };
 use inout::block_padding::Pkcs7;
 
-pub(crate) fn encrypt(plaintext: &[u8], key: &[u8], iv: &[u8], tag: &mut [u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+pub fn encrypt(plaintext: &[u8], key: &[u8], iv: &[u8], tag: &mut [u8]) -> Result<Vec<u8>, aes_gcm::Error> {
 	let key = Key::<Aes128Gcm>::from_slice(key);
 	let nonce = Nonce::from_slice(iv);
 	let cipher = Aes128Gcm::new(key);
@@ -30,7 +30,7 @@ pub(crate) fn encrypt(plaintext: &[u8], key: &[u8], iv: &[u8], tag: &mut [u8]) -
 	Ok(ciphertext)
 }
 
-pub(crate) fn decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8], tag: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+pub fn decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8], tag: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
 	let key = Key::<Aes128Gcm>::from_slice(key);
 	let nonce = Nonce::from_slice(iv);
 	let cipher = Aes128Gcm::new(key);
@@ -43,7 +43,7 @@ pub(crate) fn decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8], tag: &[u8]) -> R
 	cipher.decrypt(nonce, payload.as_ref())
 }
 
-pub(crate) fn encrypt_cbc(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String> {
+pub fn encrypt_cbc(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String> {
 	let key: &Array<u8, _> = key.try_into().map_err(|_| "Invalid CBC key length")?;
 	let iv: &Array<u8, _> = iv.try_into().map_err(|_| "Invalid CBC IV length")?;
 
