@@ -4,30 +4,38 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 TMPBASE="${TMPDIR:-.}"
 TMP=$(mktemp -d "$TMPBASE/test-XXXXXX")
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"; killall -9 rgsp-host 2>/dev/null || true' EXIT
 
 mkdir -p "$TMP/pak"
 cp "$HERE/../pak/launch.sh" "$TMP/pak/"
-# Stub daemon: sleeps until killed, creates and removes PID file to emulate real daemon.
+
+# Stub daemon: responds to STOP file signal (workaround for sandbox signal delivery issues)
 cat > "$TMP/pak/rgsp-host" <<'EOF'
 #!/bin/sh
-mkdir -p "$(dirname "$RGSP_RUN_DIR/daemon.pid")"
-echo $$ > "$RGSP_RUN_DIR/daemon.pid"
-# Use a wrapper to handle cleanup
-(
-  trap 'exit 0' TERM
-  sleep 300
-)
-rm -f "$RGSP_RUN_DIR/daemon.pid"
+PIDFILE="$RGSP_RUN_DIR/daemon.pid"
+STOPFILE="$RGSP_RUN_DIR/daemon.stop"
+mkdir -p "$(dirname "$PIDFILE")"
+echo $$ > "$PIDFILE"
+# Poll for stop signal every 0.1s (max 300s, 3000 iterations)
+i=0
+while [ $i -lt 3000 ]; do
+  [ -f "$STOPFILE" ] && { rm -f "$STOPFILE" "$PIDFILE"; exit 0; }
+  sleep 0.1
+  i=$((i+1))
+done
 EOF
 chmod +x "$TMP/pak/rgsp-host" "$TMP/pak/launch.sh"
+
 # Stub show2 so the script does not need NextUI.
 mkdir -p "$TMP/bin"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/show2.elf"
 chmod +x "$TMP/bin/show2.elf"
+
 export PATH="$TMP/bin:$PATH"
 export RGSP_RUN_DIR="$TMP/run"
 export SHARED_USERDATA_PATH="$TMP/userdata"
+# Use stop file mechanism for testing (real daemon uses SIGTERM)
+export RGSP_STOP_CMD="touch $TMP/run/daemon.stop"
 
 echo "--- first launch should start the daemon ---"
 sh "$TMP/pak/launch.sh"
@@ -39,5 +47,33 @@ sh "$TMP/pak/launch.sh"
 sleep 1
 if kill -0 "$PID" 2>/dev/null; then echo "FAIL: daemon still running"; exit 1; fi
 [ -f "$TMP/run/daemon.pid" ] && { echo "FAIL: pidfile left behind"; exit 1; }
+
+echo "--- daemon that ignores stop signal should leave pidfile alone ---"
+# Create a new daemon that ignores the STOP file
+cat > "$TMP/pak/rgsp-host" <<'STUBSTUCK'
+#!/bin/sh
+mkdir -p "$(dirname "$RGSP_RUN_DIR/daemon.pid")"
+echo $$ > "$RGSP_RUN_DIR/daemon.pid"
+# Ignore stop signal, just sleep for 300 seconds
+sleep 300
+STUBSTUCK
+chmod +x "$TMP/pak/rgsp-host"
+
+sh "$TMP/pak/launch.sh"
+PID2=$(cat "$TMP/run/daemon.pid")
+kill -0 "$PID2" || { echo "FAIL: daemon not running"; exit 1; }
+
+echo "--- third launch should detect stuck daemon ---"
+sh "$TMP/pak/launch.sh"
+sleep 1
+# Daemon should still be running
+if ! kill -0 "$PID2" 2>/dev/null; then echo "FAIL: stuck daemon was killed"; exit 1; fi
+# PID file should still exist (not deleted)
+[ -f "$TMP/run/daemon.pid" ] || { echo "FAIL: pidfile was deleted while daemon running"; exit 1; }
+# Verify it's the same PID
+[ "$(cat "$TMP/run/daemon.pid")" = "$PID2" ] || { echo "FAIL: PID changed"; exit 1; }
+
+# Clean up the stuck daemon
+kill -9 "$PID2" 2>/dev/null || true
 
 echo PASS

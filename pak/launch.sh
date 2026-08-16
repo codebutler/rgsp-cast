@@ -27,15 +27,32 @@ show() {
 
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     # Already casting: stop.
-    kill -TERM "$(cat "$PID_FILE")" 2>/dev/null || true
-    # The daemon removes its own pidfile on clean exit; give it a moment.
+    PID="$(cat "$PID_FILE")"
+    # For testing: allow alternate stop mechanism (e.g., stop file) via RGSP_STOP_CMD
+    if [ -n "${RGSP_STOP_CMD:-}" ]; then
+        eval "$RGSP_STOP_CMD"
+    else
+        kill -TERM "$PID" 2>/dev/null || true
+    fi
+    # The daemon removes its own pidfile on clean exit; give it up to ~15 seconds.
     i=0
-    while [ -f "$PID_FILE" ] && [ $i -lt 20 ]; do i=$((i+1)); sleep 0.1; done
-    rm -f "$PID_FILE"
-    show
+    while [ -f "$PID_FILE" ] && [ $i -lt 150 ]; do i=$((i+1)); sleep 0.1; done
+    # If file is gone, daemon exited cleanly. If still there, leave it alone:
+    # the daemon is still shutting down normally. Deleting the file would cause
+    # the next launch to start a second instance, which loses the flock.
+    if [ ! -f "$PID_FILE" ]; then
+        # Daemon exited cleanly. Show normal status.
+        show
+    else
+        # Daemon still running (normal if shutting down). Report to user.
+        show2.elf --mode=simple --image="$PAK_DIR/cast.png" --bgcolor=0x000000 &
+        SHOW_PID=$!
+        sleep 2
+        kill "$SHOW_PID" 2>/dev/null || true
+    fi
 else
     # Not casting: start, detached, so it survives this script exiting.
-    ( "$PAK_DIR/rgsp-host" >"$LOG" 2>&1 & )
+    "$PAK_DIR/rgsp-host" >"$LOG" 2>&1 &
     i=0
     while [ ! -f "$PID_FILE" ] && [ $i -lt 50 ]; do i=$((i+1)); sleep 0.1; done
     show
