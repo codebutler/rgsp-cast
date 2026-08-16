@@ -333,6 +333,12 @@ impl VideoStream {
 		})
 	}
 
+	/// Returns the started stream's handle plus a clone of the IDR-request
+	/// broadcast sender, so a caller outside this crate can `.subscribe()`
+	/// and forward client-requested keyframes to the host's encoder (e.g.
+	/// `rgsp_host::video::IdrRequester`). Reference-invalidation and reset
+	/// requests are not exposed this way yet — see `VideoStreamHandle`'s
+	/// own methods, which only reach callers inside the crate today.
 	#[allow(clippy::too_many_arguments)]
 	pub fn start(
 		self,
@@ -341,7 +347,7 @@ impl VideoStream {
 		keys_rx: SessionKeysReceiver,
 		frame_rx: mpsc::Receiver<EncodedFrame>,
 		stop: ShutdownManager<SessionShutdownReason>,
-	) -> Result<VideoStreamHandle, ()> {
+	) -> Result<(VideoStreamHandle, broadcast::Sender<()>), ()> {
 		// The Vulkan encode pipeline that both encoded frames and packetized
 		// them was removed with the compositor. Encoding now happens outside
 		// the crate (the host's Cedar encoder feeds `frame_rx`); packetizing
@@ -360,8 +366,11 @@ impl VideoStream {
 		// Gate for packetize loop + packet handler.
 		let start_notify = Arc::new(Notify::new());
 
-		// IDR broadcast channel.
+		// IDR broadcast channel. A clone of the sender is returned alongside
+		// the handle so a caller outside this crate can subscribe and relay
+		// IDR requests to the host's encoder.
 		let (idr_tx, _idr_rx) = broadcast::channel(1);
+		let idr_tx_for_host = idr_tx.clone();
 
 		// Reference frame invalidation broadcast channel. Sized for a small burst
 		// of loss reports; the encode loop drains all pending each iteration.
@@ -388,12 +397,15 @@ impl VideoStream {
 			stop,
 		);
 
-		Ok(VideoStreamHandle {
-			notify: start_notify,
-			idr_tx,
-			invalidate_tx,
-			reset_tx,
-		})
+		Ok((
+			VideoStreamHandle {
+				notify: start_notify,
+				idr_tx,
+				invalidate_tx,
+				reset_tx,
+			},
+			idr_tx_for_host,
+		))
 	}
 }
 

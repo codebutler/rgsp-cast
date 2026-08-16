@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_shutdown::ShutdownManager;
 use manager::SessionShutdownReason;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::session::stream::audio::AudioChannels;
 use crate::session::stream::audio::AudioStream;
@@ -203,7 +203,15 @@ impl LaunchedSession {
 		audio_ctx: AudioStreamContext,
 		frame_rx: mpsc::Receiver<EncodedFrame>,
 		stop: ShutdownManager<SessionShutdownReason>,
-	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>), ()> {
+	) -> Result<
+		(
+			ActiveSession,
+			Arc<tokio::sync::Notify>,
+			Arc<tokio::sync::Notify>,
+			broadcast::Sender<()>,
+		),
+		(),
+	> {
 		let Self {
 			context,
 			audio,
@@ -219,8 +227,9 @@ impl LaunchedSession {
 			tracing::error!("Session keys not initialized");
 		})?;
 
-		// Start video stream — gated, returns VideoStreamHandle.
-		let video_handle = video_stream
+		// Start video stream — gated, returns VideoStreamHandle plus a
+		// clone of the IDR-request sender for callers outside this crate.
+		let (video_handle, idr_request_tx) = video_stream
 			.start(video_config, video_ctx, keys_rx.clone(), frame_rx, stop.clone())
 			.map_err(|()| tracing::error!("Failed to start video stream"))?;
 
@@ -254,6 +263,7 @@ impl LaunchedSession {
 			},
 			video_start_notify,
 			audio_start_notify,
+			idr_request_tx,
 		))
 	}
 }

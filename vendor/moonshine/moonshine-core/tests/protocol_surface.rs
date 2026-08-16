@@ -28,4 +28,7 @@ fn protocol_layer_is_public() {
 	// The seam this task added: SessionManager's accessor for the encoded-frame
 	// channel that feeds the video stream's packetize loop.
 	let _ = moonshine_core::session::manager::SessionManager::video_frame_sender;
+	// Symmetric accessor for client-requested IDR frames, reaching the host
+	// encoder from outside the crate.
+	let _ = moonshine_core::session::manager::SessionManager::idr_request_receiver;
 }

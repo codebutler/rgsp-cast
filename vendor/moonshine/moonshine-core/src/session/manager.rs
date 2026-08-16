@@ -83,6 +83,12 @@ struct SessionManagerInner {
 	/// video stream is active. `None` until `start_session()` succeeds.
 	video_frame_tx: Option<mpsc::Sender<EncodedFrame>>,
 
+	/// Clone of the video stream's IDR-request broadcast sender. Lets the
+	/// host encoder subscribe for client-requested keyframes (e.g. after
+	/// packet loss) without living inside the crate. `None` until
+	/// `start_session()` succeeds.
+	idr_request_tx: Option<broadcast::Sender<()>>,
+
 	/// Notify to trigger the audio pipeline start (used by bench / external callers).
 	audio_start_notify: Option<Arc<tokio::sync::Notify>>,
 
@@ -112,6 +118,7 @@ impl SessionManagerInner {
 		self.video_start_notify = None;
 		self.audio_start_notify = None;
 		self.video_frame_tx = None;
+		self.idr_request_tx = None;
 		self.stop = ShutdownManager::new();
 	}
 }
@@ -169,6 +176,7 @@ impl SessionManager {
 			video_start_notify: None,
 			audio_start_notify: None,
 			video_frame_tx: None,
+			idr_request_tx: None,
 			shutdown: shutdown.clone(),
 			_trigger_token: trigger_token,
 			_delay_token: delay_token,
@@ -195,6 +203,18 @@ impl SessionManager {
 	/// there, alongside the video stream that owns the receiving end.
 	pub async fn video_frame_sender(&self) -> Option<mpsc::Sender<EncodedFrame>> {
 		self.inner.lock().await.video_frame_tx.clone()
+	}
+
+	/// Subscribe to client-requested IDR (keyframe) requests.
+	///
+	/// The control stream calls `VideoStreamHandle::request_idr_frame()`
+	/// when the client reports it can't decode (e.g. after packet loss);
+	/// this is how that request reaches the host's encoder. Returns a fresh
+	/// `broadcast::Receiver` each call — subscribe once and hold onto it,
+	/// since requests sent before a receiver exists are lost, same as any
+	/// broadcast channel. `None` until `start_session()` succeeds.
+	pub async fn idr_request_receiver(&self) -> Option<broadcast::Receiver<()>> {
+		self.inner.lock().await.idr_request_tx.as_ref().map(|tx| tx.subscribe())
 	}
 
 	/// Trigger the video and audio pipelines to start encoding.
@@ -394,6 +414,20 @@ impl SessionManager {
 		tracing::info!("Starting session streams.");
 		// Channel the host's encoder feeds via `video_frame_sender()`; the
 		// receiving end is handed to the video stream's packetize loop.
+		//
+		// Bound of 4 is a starting guess, not a measured value. Backpressure
+		// note: this is a bounded mpsc, so a full channel blocks the
+		// *sender* — which on the host side is expected to be the capture
+		// thread (`rgsp_host::video::VideoStream::run`, doc'd as running on
+		// a dedicated blocking thread precisely so it's safe to block).
+		// That means a stalled packetize/send path stalls capture rather
+		// than dropping frames. For a live low-latency stream that is
+		// usually the wrong tradeoff — dropping a stale frame and catching
+		// up is better than falling behind and delaying every frame after
+		// it. Left as-is pending real on-device backpressure behavior; the
+		// alternative, if this turns out to bite, is a ring buffer /
+		// try_send-and-drop policy on the host side rather than growing
+		// this bound.
 		let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(4);
 		let mut guard = self.inner.lock().await;
 		let video_config = guard.video_config.clone();
@@ -409,11 +443,12 @@ impl SessionManager {
 			)
 			.await
 		{
-			Ok((active, video_notify, audio_notify)) => {
+			Ok((active, video_notify, audio_notify, idr_request_tx)) => {
 				guard.session = Some(SessionState::Active(active));
 				guard.video_start_notify = Some(video_notify);
 				guard.audio_start_notify = Some(audio_notify);
 				guard.video_frame_tx = Some(frame_tx);
+				guard.idr_request_tx = Some(idr_request_tx);
 				Ok(())
 			},
 			Err(()) => {

@@ -52,6 +52,14 @@ pub struct IdrRequester {
 }
 
 impl IdrRequester {
+    /// Flags the next `run()` iteration to call `Capture::request_idr()`.
+    ///
+    /// Task 10's wiring: spawn a task that awaits
+    /// `moonshine_core::session::manager::SessionManager::idr_request_receiver()`
+    /// (a `broadcast::Receiver<()>`, symmetric with `video_frame_sender()`)
+    /// and calls `request()` here on every message received — that's how a
+    /// client-requested keyframe (e.g. after packet loss) reaches the Cedar
+    /// encoder.
     pub fn request(&self) {
         self.flag.store(true, Ordering::Relaxed);
     }
