@@ -68,29 +68,53 @@ int main(void)
         return 2;
     }
 
-    /* ── phase 2: force an IDR twice, at two different off-cadence points ── */
+    /* ── phase 2: force an IDR twice, at two different off-cadence points ──
+     *
+     * The encoder keeps emitting its own keyframes every `gop` frames
+     * throughout, so keyframes appearing in the run-up are expected and prove
+     * nothing either way. What makes a trial conclusive is where the *forced*
+     * frame sits: if it is several frames away from the nearest natural
+     * boundary, the encoder was not about to emit a keyframe there. */
     const int offsets[2] = { 17, 29 };
     int fails = 0;
+    int next_index = OBSERVE;   /* absolute index of the next frame to pull */
 
     printf("\nphase 2: forcing an IDR at two off-cadence offsets\n");
+    printf("  (natural keyframes predicted at frame %d + n*%d)\n", first, gop);
     for (int t = 0; t < 2; t++) {
         size_t len_before = 0, len_forced = 0;
         int stray = 0;
 
-        /* Run up to the request point. These frames are the control: if the
-         * encoder is quiet across all of them, it is not on a boundary. */
-        for (int i = 0; i < offsets[t]; i++) stray += pull(c, &len_before);
+        for (int i = 0; i < offsets[t]; i++) {
+            stray += pull(c, &len_before);
+            next_index++;
+        }
 
         rgsp_capture_request_idr(c);
         int k = pull(c, &len_forced);
+        int forced_at = next_index++;
 
-        printf("  trial %d: %d run-up frames contained %d keyframes; "
-               "frame after request: keyframe=%d\n",
-               t + 1, offsets[t], stray, k);
-        printf("           sizes: forced frame %zu bytes vs preceding %zu bytes\n",
-               len_forced, len_before);
-        if (stray)  printf("           NOTE: keyframes in the run-up weaken this trial\n");
-        if (!k) { printf("           FAIL: forced IDR did not produce a keyframe\n"); fails++; }
+        /* Distance from the forced frame to the nearest predicted boundary. */
+        int off = (forced_at - first) % gop;
+        if (off < 0) off += gop;
+        int dist = off < gop - off ? off : gop - off;
+
+        printf("  trial %d: forced frame is index %d; nearest natural keyframe "
+               "%d frames away\n", t + 1, forced_at, dist);
+        printf("           keyframe=%d; size %zu bytes vs %zu for the preceding "
+               "frame (%.0fx)\n", k, len_forced, len_before,
+               len_before ? (double)len_forced / (double)len_before : 0.0);
+        printf("           (%d keyframes in the %d-frame run-up, as the natural "
+               "cadence predicts)\n", stray, offsets[t]);
+
+        if (dist < 2) {
+            printf("           INCONCLUSIVE: forced frame sits on a natural "
+                   "boundary, so this trial proves nothing\n");
+            fails++;
+        } else if (!k) {
+            printf("           FAIL: forced IDR did not produce a keyframe\n");
+            fails++;
+        }
     }
 
     rgsp_capture_close(c);

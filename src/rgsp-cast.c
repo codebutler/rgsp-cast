@@ -348,7 +348,6 @@ struct rgsp_capture {
     VideoEncoder    *enc;
     ScMemOpsS       *memops;
     int              mem_open, buffers_alloced, enc_inited;
-    VencInputBuffer  inbuf, used;
     VencInputBuffer *held;          /* input buffer currently checked out */
     int              in_fmt, rgb_in;
 
@@ -368,6 +367,24 @@ struct rgsp_capture {
     int       force_idr;
     int       short_reads;
     long long convert_ns, encode_ns;
+
+    /* Vendor-written structs go LAST, and nothing may be added after them.
+     *
+     * The vendor libraries write past the end of VencInputBuffer, beyond even
+     * its _tail[256] padding. Measured with a 0xAA sentinel guard on-device:
+     * the AlreadyUsedInputBuffer/ReturnOneAllocInputBuffer pair modifies up to
+     * **+24 bytes past the end of `used`**, every frame. Most of that write is
+     * zeroes, which is why it is invisible to a scan for non-zero bytes.
+     *
+     * As stack locals in the old main() the spill landed on adjacent scratch
+     * and was harmless, which is why it went unnoticed for so long. As struct
+     * members it lands on live fields: out_buf sat at +16..+23 past `used` and
+     * was nulled every frame, segfaulting on the first one. Keeping the pair
+     * adjacent and in this order reproduces the layout the vendor libs have
+     * always been fed, and _vendor_guard (4096, vs the 24 observed) absorbs the
+     * spill. Nothing may be added after them. */
+    VencInputBuffer inbuf, used;
+    unsigned char   _vendor_guard[4096];
 };
 
 /* Append AVCC (4-byte length prefixes) to the output buffer as Annex-B start
