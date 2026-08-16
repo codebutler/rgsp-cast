@@ -107,15 +107,32 @@ rgsp-host status ................  2 passed; 0 failed
 rgsp-host video_stream ..........  2 passed; 0 failed
 ```
 
-**Clippy**: `cargo clippy --workspace --all-targets` reports **zero** findings in
-`main.rs`, `status.rs` and `tests/status.rs`. It does fail overall on **six
-pre-existing** errors in files this task did not touch — `capture.rs:87`
-(`should_implement_trait` on `next`) and `routing.rs:145,148,216,225,274`
-(`manual_c_str_literals`). These are new lints from a newer clippy than earlier
-tasks ran (the `rust:1-bookworm` tag floats; it is 1.97.1 today), not
-regressions from this diff. The fixes are mechanical (`c"InitSettings"` literals,
-one `#[allow]`), but they are Task 4's and Task 8's files, so I left them for a
-ruling rather than editing another task's reviewed code.
+**Clippy**: `cargo clippy --workspace --all-targets -- -D warnings` is **clean**.
+
+It was red on arrival at findings in files this task did not write, surfaced by
+a newer clippy than earlier tasks ran (the `rust:1-bookworm` tag floats; it is
+1.97.1 today): `capture.rs:87` (`should_implement_trait`), five
+`manual_c_str_literals` in `routing.rs`, and two unused-binding errors in the
+`#[ignore]`d loopback test. Fixed on the controller's ruling in a separate
+commit (`7a461d0`), with no behaviour change:
+
+- `c"InitSettings"` and friends are the same `&'static CStr` that
+  `CStr::from_bytes_with_nul(b"InitSettings\0").unwrap()` produced.
+- `Capture::next` gets an `#[allow]`, since the `Frame` it returns borrows
+  `self` for its lifetime and `Iterator` cannot express that.
+- The unused binding becomes `_cap`, which still holds the capture end of the
+  cable open — the same shape the sibling test at line 58 already used.
+
+The `c""` literals feed exactly one thing: the `dlopen`/`dlsym` chain into
+NextUI's libmsettings, which no container test can exercise. Re-verified on the
+device rather than argued from the diff:
+
+```
+[DEBUG] USERDATA_PATH set to /mnt/SDCARD/.userdata/h700
+[DEBUG] libmsettings initialized from /mnt/SDCARD/.system/h700/lib/libmsettings.so
+```
+
+That matches Task 8's evidence line for line.
 
 ## Device smoke test (real output, 192.168.180.106)
 
@@ -268,15 +285,16 @@ No vendored logic changed; no upstream behaviour changed.
    `AudioChannels`; the host always sends 480 stereo samples. A client that
    negotiates 5.1 would have every chunk dropped — silent audio, warn-level
    only. Nothing pins negotiation to stereo. Moonlight defaults to stereo, so
-   this is not a blocker, but it is a real hole.
+   this is not a blocker, but it is a real hole. Recorded in the source at the
+   chunk-size check (`0c102ce`) so the next person meets it there.
 2. **Build recipe change** (above): `libopus-dev` must be *absent* from the
    build container for the release binary that ships, or it cannot start on the
    device. Tasks 13/15. Note the artifact cache carries the choice: a `target/`
    populated by a `libopus-dev` build fails to link once the package is removed
    (`cannot find -lopus`) until that package is rebuilt. Container test runs are
    unaffected either way — this only matters for the binary that is deployed.
-3. **Clippy gate is red on pre-existing findings** in `capture.rs` and
-   `routing.rs` (above). Needs a ruling; not touched here.
+3. ~~Clippy gate red~~ — **resolved** in `7a461d0` on the controller's ruling;
+   the gate is green and the dlopen path was re-verified on device.
 4. **The idle status line is recomputed after each session**, so a first-time
    user does not see "Pair at …" again after pairing, and the address refreshes
    with it. It is still computed once at startup, so a DHCP change before the
