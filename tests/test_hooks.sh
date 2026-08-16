@@ -144,21 +144,33 @@ mkdir -p "$TESTDIR4"
 trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b' '$TESTDIR3' '$TESTDIR4'" EXIT
 export RGSP_RUN_DIR="$TESTDIR4"
 export RGSP_PAK_DIR="$TESTDIR4/pak"
-mkdir -p "$TESTDIR4" "$TESTDIR4/pak"
+mkdir -p "$TESTDIR4" "$TESTDIR4/pak" "$TESTDIR4/bin"
+
+# Stub ip command so WiFi loop breaks immediately
+cat > "$TESTDIR4/bin/ip" <<'EOF'
+#!/bin/sh
+echo "    inet 192.168.1.50/24 brd 192.168.1.255 scope global wlan0"
+exit 0
+EOF
+chmod +x "$TESTDIR4/bin/ip"
 
 # Create recording stub for rgsp-host in PAK_DIR
 cat > "$TESTDIR4/pak/rgsp-host" <<'EOF'
 #!/bin/sh
-echo "$@" >> "$RGSP_RUN_DIR/rgsp-host.calls"
+echo "RGSP_HOST CALLED WITH: $@"
 exit 0
 EOF
 chmod +x "$TESTDIR4/pak/rgsp-host"
 
 # Without was-casting file, hook should exit early and NOT call rgsp-host
+export PATH="$TESTDIR4/bin:$PATH"
 sh "$HERE"/../pak/hooks/post-resume.d/10-rgsp-resume.sh >/dev/null 2>&1 || true
 
-# Verify rgsp-host was NOT called
-if [ ! -f "$TESTDIR4/rgsp-host.calls" ] || [ ! -s "$TESTDIR4/rgsp-host.calls" ]; then
+# Wait for any background process to complete
+sleep 0.5
+
+# Verify rgsp-host was NOT called (daemon.log should not exist or be empty)
+if [ ! -f "$TESTDIR4/daemon.log" ] || ! grep -q "RGSP_HOST" "$TESTDIR4/daemon.log" 2>/dev/null; then
     echo "ok: 10-rgsp-resume.sh does not start daemon without was-casting marker"
 else
     echo "FAIL: 10-rgsp-resume.sh started daemon without was-casting marker"
@@ -172,7 +184,15 @@ mkdir -p "$TESTDIR5"
 trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5'" EXIT
 export RGSP_RUN_DIR="$TESTDIR5"
 export RGSP_PAK_DIR="$TESTDIR5/pak"
-mkdir -p "$TESTDIR5" "$TESTDIR5/pak"
+mkdir -p "$TESTDIR5" "$TESTDIR5/pak" "$TESTDIR5/bin"
+
+# Stub ip command so WiFi loop breaks immediately
+cat > "$TESTDIR5/bin/ip" <<'EOF'
+#!/bin/sh
+echo "    inet 192.168.1.50/24 brd 192.168.1.255 scope global wlan0"
+exit 0
+EOF
+chmod +x "$TESTDIR5/bin/ip"
 
 # Create recording stub for rgsp-host in PAK_DIR
 cat > "$TESTDIR5/pak/rgsp-host" <<'EOF'
@@ -189,6 +209,7 @@ mkdir -p "$TESTDIR5/pak/lib/h700"
 touch "$TESTDIR5/was-casting"
 
 # Run hook - should remove marker and start daemon
+export PATH="$TESTDIR5/bin:$PATH"
 sh "$HERE"/../pak/hooks/post-resume.d/10-rgsp-resume.sh >/dev/null 2>&1 || true
 
 # Give background process a chance to run
