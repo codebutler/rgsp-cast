@@ -1,0 +1,459 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [v0.15.0] - 05-08-2026
+
+### Added
+
+- Heroic Games Launcher application scanner, discovering installed Epic, GOG, Amazon and sideloaded games with box art. (#152, @scottjab)
+- Pipeline video encoding with pixelforge, honoring reference frame invalidation requests instead of forcing IDR frames and dropping frames to catch up under load. (#116, @urwrstkn8mare)
+- Use Generic Segmentation Offload (GSO) for video stream sends.
+- Expose `wl_compositor` v6.
+- Healthcheck now verifies the host user is in the input group and recommends Arch Linux packages when checks fail.
+
+### Fixed
+
+- Honor the client's requested color range in the color converter and encoder VUI, so full-range sessions no longer stream limited-range data, and detect HDR status from the transfer function rather than the whole color description. (#146, @lutyjj)
+- Inject AV1 mastering-display metadata for full-range clients now that the metadata OBUs are spec-valid. (#166, @lutyjj)
+- Terminate AV1 metadata OBUs with trailing bits and convert MDCV values to AV1's units, so decoders no longer reject the HDR metadata. (#154, @lutyjj)
+- Keep mastering-display metadata from promoting SDR surfaces to BT.2020+PQ. (#148, @lutyjj)
+- Split oversized GSO video sends to fit the kernel's UDP limits, fixing streams that froze at high bitrates. (#157, @lutyjj)
+- Implement X11 fullscreen requests and acknowledge XDG shell fullscreen requests, fixing fullscreen games that stalled at partial size. (#147, @lutyjj; #158, @rosslovas)
+- Raise the ENet channel limit to match moonlight-common-c, enabling a reliable gyro data stream for the PS5 DualSense controller. (#151, @maugsburger)
+- Send a configure on every commit whose size mismatches.
+- Write app stdout and stderr to files instead of losing them.
+- Reduce info log noise and silence benign TLS warnings.
+- Warn when the Lutris database or Heroic config directory is missing. (#152, @scottjab)
+- Preserve SteamOS configuration across updates. (#153, @tdejager)
+- NixOS module installs the moonshine-wsi Vulkan layer into the driver path (`/run/opengl-driver`) instead of leaving it in a store path the Vulkan loader never scans. Games were falling back to XWayland rendering and the healthcheck reported the layer as missing. (#162, @scottjab)
+
+## [v0.14.5] - 30-07-2026
+
+### Changed
+
+- Dropped systemd-sysext extension in favor of deploying to `/opt/moonshine/` and `/etc/` drop-in directories. Avoids SELinux boot failures on Fedora Atomic / Bazzite caused by unlabeled overlayfs files.
+
+### Fixed
+
+- WSI layer detection in healthcheck now queries the Vulkan loader directly instead of checking hardcoded file paths, making it work regardless of where the layer files are installed.
+
+## [v0.14.4] - 30-07-2026
+
+### Fixed
+
+- Improve installation steps in install script.
+
+### Changed
+
+- Assume default config path in all moonshine commands (`$HOME/.config/moonshine/config.toml`).
+
+## [v0.14.3] - 30-07-2026
+
+### Fixed
+
+- Add missing install script.
+
+## [v0.14.2] - 30-07-2026
+
+### Added
+
+- Build and release systemd-sysext extension for distributing Moonshine as a portable system extension.
+
+## [v0.14.1] - 28-07-2026
+
+### Added
+
+- Wait for D-Bus to become available on startup, preventing session launch failures when D-Bus starts asynchronously.
+
+### Changed
+
+- Use Rust edition 2024.
+
+### Fixed
+
+- Drop nonexistent `security.polkit.extraPolicies` from NixOS module that caused evaluation failures (#141, @scottjab).
+- Include polkit and sysusers rule files in the binary release package.
+
+## [v0.14.0] - 27-07-2026
+
+### Added
+
+- Startup health checks for GPU, EGL, Vulkan, codecs, HDR, DMA-BUF, ports, and external dependencies (#136).
+- Automatic system sleep inhibition during active streaming sessions.
+- Lutris game scanner for automatically detecting installed Lutris games (#133, @stgreenb).
+- Nix flake with package and NixOS module (#129, @scottjab).
+
+### Fixed
+
+- Log errors when failing to open the pairing PIN URL.
+
+## [v0.13.5] - 23-07-2026
+
+### Changed
+
+- Remove unnecessary linking to libunwind.so.1.
+
+## [v0.13.4] - 23-07-2026
+
+### Fixed
+
+- Fix duplication in nfpm.yaml.
+
+## [v0.13.3] - 23-07-2026
+
+### Fixed
+
+- Fix export of VERSION environment variable.
+
+## [v0.13.2] - 23-07-2026
+
+### Added
+
+- Add missing nfpm.yaml file.
+
+## [v0.13.1] - 23-07-2026
+
+### Added
+
+- Manual trigger for release action workflow.
+
+## [v0.13.0] - 23-07-2026
+
+### Added
+
+- Pass client display information (`MOONSHINE_CLIENT_WIDTH`, `MOONSHINE_CLIENT_HEIGHT`, `MOONSHINE_CLIENT_FRAMERATE`) as environment variables to launched applications (#109, @BigDiaB).
+- Package releases as `.deb`, `.rpm`, and `.pkg.tar.zst` via nfpm (#130).
+
+### Changed
+
+- Make `WAYLAND_DEBUG` opt-in behind `MOONSHINE_WAYLAND_DEBUG` environment variable.
+- Update CI to Ubuntu 24.04.
+- Bump pixelforge dependency.
+
+### Fixed
+
+- Use limited (TV) range instead of full range in SDR mode for correct color output (#126).
+- Subscribe to systemd signals before waiting on job/unit events to prevent launch/stop timeouts on headless, linger-only hosts (#124, @scottjab).
+- Fall back to PulseAudio when PipeWire is available to fix audio compatibility.
+
+## [v0.12.0] - 20-07-2026
+
+### Added
+
+- scRGB HDR streaming by converting `EXTENDED_SRGB_LINEAR` to BT.2020+PQ (#102, @urwrstkn8mare).
+- XWayland bypass safety checks and runtime toggle.
+- Configurable hold-to-Home gamepad button remapping with `suppress_home` and rumble feedback (#98, @urwrstkn8mare).
+- Simple benchmark tool (`moonshine-bench`) (#107).
+- mDNS advertise mode selection (#111, @urwrstkn8mare).
+- Reply to `/unpair` with HTTP 200 status code.
+- Improved DMA-BUF import time.
+- Limit info logging to moonshine logs in `moonshine@.service`.
+- Option to force stream to IPv4 (@urwrstkn8mare).
+- Auto-release GitHub workflow (@urwrstkn8mare).
+- `modules-load.d` configuration for virtual input devices (#101, @urwrstkn8mare).
+- Color-space mapping and DRM fourcc unit tests (#102, @urwrstkn8mare).
+
+### Changed
+
+- Replace Avahi/zeroconf with embedded `mdns-sd` responder (#111, @urwrstkn8mare).
+- Replace custom Steam library parsing with `steamlocate` crate.
+- Move certificate functions to `webserver::tls`.
+- Rename config `hdr_support` to `hdr`.
+- Simplify `ClientManager`.
+- Add custom `ShutdownReason`.
+- Move core components to `moonshine-core` crate.
+- Nest gamepad configuration under `stream.control` (@urwrstkn8mare).
+- Prefer BT.2020+PQ over scRGB-linear when both are declared (#102, @urwrstkn8mare).
+- Rename `Bt709Linear`/`LinearExtended` to `ScrgbLinear` (#102, @urwrstkn8mare).
+- Simplify network config to allow either IPv4 or dual-stack.
+- Update pixelforge to 0.4.0.
+- Update dependencies.
+- Codebase cleanup and refactoring (#95).
+
+### Fixed
+
+- Stream would hang when changing HDR formats (#102, @urwrstkn8mare).
+- Preserve scRGB colorspace when `vkSetHdrMetadataEXT` arrives after swapchain feedback (#102, @urwrstkn8mare).
+- Map `create_windows_scrgb` to scRGB-linear (#102, @urwrstkn8mare).
+- Reduce log spam from FH6 HDR (#102, @urwrstkn8mare).
+- Return `localip` in `/serverinfo` (#111, @urwrstkn8mare).
+- mDNS interface filtering (#111, @urwrstkn8mare).
+- Stop session when launched app exits (#104, @urwrstkn8mare).
+- Bind webserver dual-stack so IPv4 and IPv6 clients can both reach it (#100, @urwrstkn8mare).
+- Reset video frame counter when a client resumes (#103, @urwrstkn8mare).
+- Resume active session on RTSP reconnect instead of erroring (#103, @urwrstkn8mare).
+- Correct scrolling units conversion.
+- Replace `requested_bytes` with missing/requested split to prevent PulseAudio request deadlock.
+- Propagate pairing failure to client.
+- Use dedicated thread for zeroconf discovery.
+- Set Enet `peer_count=128` to allow quick reconnects.
+- Use timers and events to handle hold-to-home properly (#98, @urwrstkn8mare).
+- Use upstream smithay to fix Witcher 3 input issue (#108).
+- Only write ANSI color escapes when stdout is a terminal (#105, @jrfernandez).
+- Benchmark hanging forever when no frames arrive before the duration deadline (#112, @urwrstkn8mare).
+- Use platform-agnostic `c_char` type instead of `i8` for ARM compatibility (#117, @neobrain).
+- Pass stdout and stderr options to systemd unchanged.
+- Improve DEBUG logging legibility (#102, @urwrstkn8mare).
+
+## [v0.11.0] - 2026-05-16
+
+### Added
+
+- Pre/post command hooks for application launches (`pre_command`/`post_command`).
+- Keyboard configuration support.
+- Direct DMA-BUF scanout for override surfaces.
+- HDR detection via swapchain colorspace for games that don't use `vkSetHdrMetadataEXT`.
+- Virtual display dimensions inferred from requested resolution.
+- Steam library scanner handles multiple Steam libraries.
+
+### Changed
+
+- Replace `ring` with `aws-lc-rs` for RSA/TLS cryptography.
+- Completely rewrite compositor focus handling.
+- Hide cursor by default.
+- Switch from user service to system service.
+
+### Fixed
+
+- Handle XBGR16161616F fourcc format.
+- VRAM leak from DMA-BUF import cache by TTL-evicting cached imports on long sessions.
+- No audio in Waydroid by enlarging pulseaudio playback buffer target fill level.
+- Parse HDR from `/launch` request.
+
+## [v0.10.0] - 2026-04-09
+
+### Added
+
+- Custom Vulkan swapchain layer (`moonshine-wsi`) replacing the gamescope WSI layer dependency.
+- Native Wayland client support via `WAYLAND_DISPLAY`.
+- Auto-create default gamepad when `GamepadUpdate` arrives before `GamepadInfo`.
+- Set `PULSE_RUNTIME_PATH` for launched applications.
+- Support for headless operation (start service without a graphical session).
+- Expose host processing latency.
+- Relax certificate validation to allow Moonlight TV clients to pair.
+- Support pairing with non-default `uniqueid` values.
+
+### Changed
+
+- Recreate color converter on input format change (HDR <-> SDR changes).
+- Add `log_frame_spikes` configuration option.
+
+### Fixed
+
+- Fix reflected XSS by restricting `uniqueid` to hex format.
+
+## [v0.9.0] - 2026-03-30
+
+### Added
+
+- Dynamic HDR/SDR color space switching and metadata injection.
+- Forward HDR metadata from video pipeline to clients.
+- Add `enable_pairing` configuration value.
+- Add statement about security in README.md.
+- Return `sessionUrl0` in `/launch` and `/resume` endpoints.
+- Improved security: mTLS, encryption, RTSP gating, pairing.
+
+### Changed
+
+- Bump dependencies.
+
+### Fixed
+
+- Fix box art aspect ratio to match Moonlight display dimensions.
+- Scale icons to correct aspect ratio.
+
+## [v0.8.1] - 2026-03-24
+
+### Added
+
+- Bundled gamescope WSI Vulkan layer, removing the dependency on gamescope for HDR.
+
+### Fixed
+
+- Fixed missing boxart for Steam games using the new library cache format.
+- Fixed boxart resolution for manually configured applications by searching XDG icon directories.
+- Fixed surround sound (5.1/7.1) not being detected by Wine/Proton in the PulseAudio virtual sink.
+- Fixed compatibility with older gamescope WSI layers (e.g. Bazzite) that do not send `vk_engine_name` in swapchain feedback.
+
+## [v0.8.0] - 2026-03-20
+
+### Added
+
+- Desktop application scanner to automatically find installed applications.
+- HDR support for Steam and Proton games.
+- Support for 5.1 and 7.1 surround sound audio.
+- Option to select specific GPU for encoding.
+- Profiling tools for performance analysis.
+- Systemd service file and udev rules for easier deployment.
+- Added `-bigpicture` flag when launching Steam games.
+
+### Changed
+
+- Replaced `gamescope` with `smithay` for the Wayland compositor implementation.
+- Reimplemented PulseAudio integration as a separate server for better stability.
+- Replaced `reed-solomon-erasure` with `fec-rs` for forward error correction.
+- Replaced `enet` with `tokio-enet` for improved networking performance.
+- Replaced OpenSSL with `rustls` for TLS connections.
+- Migrated application lifecycle management to use `systemd` scopes.
+- Switched to `reis` for input emulation (keyboard/mouse).
+- Switched to `pixelforge` for video encoding.
+
+### Fixed
+
+- Improved handling of application exit to correctly terminate the session.
+- Fixed audio packet framing issues that caused problems on Android clients.
+- Fixed `uniqueid` validation in server info endpoint.
+- Mouse cursor is now hidden after 3 seconds of inactivity.
+- Fixed cleanup of resources when a session is forcefully stopped.
+
+## [v0.7.0] - 2025-11-23
+
+### Added
+
+- Support for AV1 encoding.
+- Support for 10 bit SDR (HDR untested).
+- Support for YUV444.
+
+### Changed
+
+- Switched to `xdg-desktop-portal` for screen capturing.
+- Switched to `gstreamer` for video encoding.
+
+## [v0.6.0] - 2025-11-18
+
+### Added
+
+- Steam library scanner now recursively searches Steam `librarycache` directories for box art, improving compatibility with different Steam layouts.
+- RTSP server now advertises server capabilities and supported encryption flags in the SDP, aligning better with Moonlight’s expectations.
+- Structured session shutdown reasons (`SessionShutdownReason`) added and wired through video, audio, control, and input components for clearer diagnostics.
+- Audio pipeline coordinated shutdown via `ShutdownManager`, and a dedicated audio packet handler task.
+- Control feedback commands (rumble, RGB LED, motion enable, trigger effects) and a feedback channel added to send encrypted feedback to clients.
+- Full support for gamepad motion (gyro/accel), touchpad input (PS5), battery status, and haptics using [`inputtino`](https://github.com/games-on-whales/inputtino) (thanks @ABeltramo!).
+- New `VideoFrameCapturer` and `VideoEncoder` components added to separate CUDA frame capture and encoding, coordinated via shared buffers and condition variables.
+
+### Changed
+
+- Input handling for keyboard, mouse, and gamepads migrated from `evdev` to `inputtino` virtual devices, simplifying mapping and improving cross-device behavior.
+- Session lifecycle refactored: `SessionManager` and `Session` now use explicit start/stop flows, `oneshot` channels for stop completion, and centralized shutdown management instead of ad-hoc flags.
+- Audio and video streams now use dedicated UDP packet handler tasks for send/receive (with QoS, PING discovery, and graceful shutdown) rather than ad-hoc loops inside stream logic.
+- Control stream rebuilt on `rusty_enet` with AES‑128‑GCM encrypted control messages (sequence-number–based IVs and explicit tags) and extended handling of Moonlight control message types (HDR mode (HDR not implemented yet), haptics, motion/LED/trigger control).
+- Video pipeline restructured to build CUDA device/frame contexts explicitly, validate capture resolution vs requested resolution, and coordinate frame flow via atomics and condition variables.
+- Logging levels and messages tuned across components (e.g. service registration, shutdown logs, command logs) to reduce noise and make lifecycle events clearer.
+
+### Fixed
+
+- Gamepad ID / kind now follow the client-provided controller type, improving correct button layouts and feature support for Xbox/PS5/Switch controllers.
+- More robust handling of closed channels and unexpected terminations in audio, video, control, and input threads, preventing silent failures and dangling sessions.
+- Session stop requests now wait (with timeout) for underlying streams to fully terminate, reducing the chance of partially torn-down sessions.
+- Escape XML characters in Steam game titles to prevent XML parsing issues in Moonlight client.
+
+## [v0.5.0] - 2024-12-19
+
+### Removed
+
+- Removed verbosity commandline flags in favor of `RUST_LOG` environment flag.
+
+### Changed
+
+- Improved frame pacing by using the latest captured frame, instead of waiting for a new frame.
+
+### Fixed
+
+- Fix sending the remaining packets when there are more than 4 video blocks.
+
+## [v0.4.1] - 2024-12-09
+
+### Changed
+
+- CI fix.
+
+## [v0.4.0] - 2024-12-09
+
+### Changed
+
+- Update dependencies.
+- Send audio as f32.
+- Set audio bitrate to 512k.
+
+## [v0.3.1] - 2024-05-20
+
+### Added
+
+- Add support for Turing and older NVIDIA cards.
+
+### Changed
+
+- Released tar file includes version number.
+- Optimizations to audio buffer management.
+- Run audio encode & capture in a dedicated thread.
+- Use `tracing` instead of `env_logger`.
+
+## [v0.3.0] - 2024-04-24
+
+### Added
+
+- Add notification when PIN is expected.
+- Add interface for submitting a PIN from Moonlight.
+
+## [v0.2.3] - 2024-04-21
+
+### Added
+
+- Add workflow for releasing binary file.
+
+### Changed
+
+- Update dependencies.
+
+## [v0.2.2] - 2024-03-05
+
+### Added
+
+- Allow to set certificate path with expansion (environment variables and `~`).
+
+### Changed
+
+- Create certificate directory if it does not exist.
+
+## [v0.2.1] - 2024-03-05
+
+### Added
+
+- Generate a config.toml file if it did not exist yet.
+
+### Removed
+
+- config.toml file in the repository.
+
+## [v0.2.0] - 2024-03-05
+
+### Added
+
+- Certificate creation through code. This creates a certificate if none exists yet.
+- Github workflow.
+- VSCode launch.json file.
+
+### Removed
+
+- Unused dependencies.
+- Removed many unwrap calls.
+- Removed xml crate (replaced by simple String formatting).
+- Removed `make-cert` script (as this is now handled in code).
+
+### Changed
+
+- Replaced custom ffmpeg binding with [ffmpeg-next](https://github.com/zmwangx/rust-ffmpeg).
+- Replaced CUDA from ffmpeg binding with [cudarc](https://github.com/coreylowman/cudarc).
+- Replaced [cpal](https://github.com/RustAudio/cpal/) with [libpulse_binding](https://github.com/jnqnfe/pulse-binding-rust). Because of this change, Moonshine will automatically pick up the right pulseaudio monitor for capturing desktop audio.
+- Replaced custom Reed Solomon encoding with [reed-solomon-erasure](https://github.com/rust-rse/reed-solomon-erasure).
+
+
+## [v0.1.0] - 2024-01-25
+
+### Added
+
+- Initial release.

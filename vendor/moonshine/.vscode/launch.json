@@ -1,0 +1,32 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Moonshine (Debug)",
+			"cwd": "${workspaceFolder}",
+			"cargo": {
+				"args": [
+					"build",
+					"--bin", "moonshine"
+				]
+			},
+			"args": ["./config.toml"]
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Moonshine (Release)",
+			"cwd": "${workspaceFolder}",
+			"cargo": {
+				"args": [
+					"build",
+					"--release",
+					"--bin", "moonshine"
+				]
+			},
+			"args": ["./config.toml"]
+		}
+	]
+}
