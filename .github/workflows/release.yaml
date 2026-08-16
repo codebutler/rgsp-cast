@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (e.g. v0.13.0)
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and package
+    # Pin to ubuntu-24.04 (glibc 2.39) so the release binary runs on
+    # Ubuntu 24.04+, Fedora 40+, Arch, ...
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Resolve tag
+      id: tag
+      run: |
+        TAG="${{ github.event.inputs.tag || github.ref_name }}"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ github.event.inputs.tag || github.ref }}
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install dependencies
+      uses: ./.github/actions/install-dependencies
+
+    - name: Build
+      run: cargo build --release --workspace
+
+    - name: Strip and fixup
+      run: |
+        strip ./target/release/moonshine ./target/release/libmoonshine_wsi.so
+        # Remove libunwind — pulled in transitively via libc++ on Ubuntu but
+        # never called at runtime (no C++ exceptions in the code path).
+        # Can be removed if inputtino-sys is changed to link -lc++ statically
+        # or dropped entirely.
+        patchelf --remove-needed libunwind.so.1 ./target/release/moonshine
+
+    - name: Bake version into install script
+      run: |
+        sed -i 's/VERSION="__VERSION__"/VERSION="${{ steps.tag.outputs.tag }}"/' ./dist/moonshine-install.sh
+
+    # Portable tarball with an FHS-ish layout (bin/, lib/, share/).
+    - name: Package portable tarball
+      run: |
+        STAGE="$RUNNER_TEMP/moonshine"
+        mkdir -p "$STAGE/bin" "$STAGE/lib/moonshine/vulkan-layers" "$STAGE/share/moonshine"
+        cp ./target/release/moonshine "$STAGE/bin/"
+        cp ./target/release/libmoonshine_wsi.so "$STAGE/lib/moonshine/vulkan-layers/"
+        cp ./dist/start-moonshine.sh ./dist/60-moonshine.rules ./dist/50-moonshine-inhibit-sleep.rules \
+           ./dist/moonshine-modules.conf ./dist/moonshine-sysusers.conf \
+           ./dist/moonshine@.service ./dist/VkLayer_moonshine_wsi.json \
+           ./dist/moonshine-atomic-update.conf "$STAGE/share/moonshine/"
+        cp ./dist/moonshine-install.sh "$STAGE/bin/"
+        cp README.md LICENSE "$STAGE/"
+        tar --zstd -cf "./moonshine-${{ steps.tag.outputs.tag }}-linux-amd64.tar.zst" \
+          -C "$RUNNER_TEMP" moonshine
+
+    - name: Install nfpm
+      run: |
+        curl -sSfL "https://github.com/goreleaser/nfpm/releases/latest/download/nfpm_2.47.0_Linux_x86_64.tar.gz" \
+          -o /tmp/nfpm.tar.gz
+        tar xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+        nfpm --version
+
+    - name: Package native formats
+      run: |
+        export VERSION="${{ steps.tag.outputs.version }}"
+        for fmt in deb rpm; do
+          nfpm package --config nfpm.yaml --packager "$fmt" --target .
+        done
+
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.tag != ''
+      with:
+        tag_name: ${{ steps.tag.outputs.tag }}
+        files: |
+          ./moonshine-${{ steps.tag.outputs.tag }}-linux-amd64.tar.zst
+          ./moonshine_*.deb
+          ./moonshine-*.rpm
+          ./dist/moonshine-install.sh

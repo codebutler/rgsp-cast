@@ -1,0 +1,24 @@
+name: Install Dependencies
+description: Installs system dependencies for Moonshine
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          clang \
+          cmake \
+          libc++-dev \
+          libc++abi-dev \
+          libclang-dev \
+          libdrm-dev \
+          libevdev-dev \
+          libgbm-dev \
+          libopus-dev \
+          libwayland-dev \
+          libxkbcommon-dev \
+          patchelf \
+          pkg-config
+      shell: bash
