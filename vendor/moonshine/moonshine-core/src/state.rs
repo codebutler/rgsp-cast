@@ -67,6 +67,21 @@ impl PersistentState {
 		Ok(data.unique_id.clone())
 	}
 
+	/// Whether any client has completed pairing.
+	///
+	/// Read by the host binary to decide whether to show a pairing URL or a
+	/// ready-to-stream message on the device's screen; `has_client` below
+	/// answers a per-client question the host has no client id for.
+	pub fn has_any_client(&self) -> bool {
+		match self.data.read() {
+			Ok(data) => !data.clients.is_empty(),
+			Err(poison) => {
+				tracing::error!("RwLock poisoned: {poison}");
+				false
+			},
+		}
+	}
+
 	pub(crate) fn save(&self) -> Result<(), ()> {
 		let data = self
 			.data

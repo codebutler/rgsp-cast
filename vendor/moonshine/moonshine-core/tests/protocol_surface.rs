@@ -33,4 +33,14 @@ fn protocol_layer_is_public() {
 	// Symmetric accessor for client recovery requests (IDR / reference
 	// invalidation / reset), reaching the host encoder from outside the crate.
 	let _ = moonshine_core::session::manager::SessionManager::encoder_control_receiver;
+	// Accessor for the raw-PCM channel the host's ALSA capture feeds.
+	let _ = moonshine_core::session::manager::SessionManager::audio_frame_sender;
+	// The negotiated fps/bitrate the host's hardware encoder is configured from.
+	let _ = moonshine_core::session::manager::SessionManager::active_video_context;
+	// Whether any client is paired, which decides the on-screen status line.
+	let _ = moonshine_core::clients::ClientManager::persistent_state;
+	// The Opus frame size the host's capture period must match. Re-exported
+	// from the private `host_source` module; rgsp-host asserts equality with
+	// its own PERIOD_FRAMES at compile time, which needs this to stay `pub`.
+	const _: usize = moonshine_core::session::stream::audio::FRAME_FRAMES;
 }

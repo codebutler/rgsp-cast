@@ -34,6 +34,16 @@ pub const CHANNELS: u32 = 2;
 /// 5 ms at 48 kHz - small enough that audio latency stays under the video's.
 pub const PERIOD_FRAMES: usize = 240;
 
+/// One capture period must be exactly one Opus frame. Moonshine's PCM bridge
+/// drops any chunk whose length differs (`host_source::chunk_len_is_valid`),
+/// and it drops it at warn level rather than failing — a mismatch would show
+/// up as silent or jittery audio at the client, never as an error. Checked at
+/// compile time so it cannot drift.
+const _: () = assert!(
+    PERIOD_FRAMES == moonshine_core::session::stream::audio::FRAME_FRAMES,
+    "capture period must equal Moonshine's Opus frame size"
+);
+
 pub struct LoopbackCapture {
     pcm: PCM,
     overrun_count: u32,

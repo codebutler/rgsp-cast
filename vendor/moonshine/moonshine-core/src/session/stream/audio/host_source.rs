@@ -33,7 +33,12 @@ const FRAME_DURATION_MS: u32 = 5;
 /// from `CAPTURE_SAMPLE_RATE` rather than hardcoded, so a future change to
 /// either constant can't silently desync from the other and mistime frames
 /// at the client.
-pub(crate) const FRAME_FRAMES: usize = (CAPTURE_SAMPLE_RATE / 1000 * FRAME_DURATION_MS) as usize;
+///
+/// `pub` (re-exported from `audio/mod.rs`) so the host's capture period can
+/// be checked against it at compile time: `rgsp_host::audio::PERIOD_FRAMES`
+/// must equal this, or every chunk the host sends is dropped by
+/// `chunk_len_is_valid` below — silent audio, no error.
+pub const FRAME_FRAMES: usize = (CAPTURE_SAMPLE_RATE / 1000 * FRAME_DURATION_MS) as usize;
 
 /// Convert one PCM chunk into an `AudioFrame`, reusing a buffer from the
 /// recycle pool if one is ready, falling back to a stashed `spare_frame` (to

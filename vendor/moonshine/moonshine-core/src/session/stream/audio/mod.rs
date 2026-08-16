@@ -16,6 +16,8 @@ use self::host_source::spawn_pcm_bridge;
 mod encoder;
 mod host_source;
 
+pub use host_source::FRAME_FRAMES;
+
 /// The audio source emits samples at this rate to the encoder.
 pub(crate) const CAPTURE_SAMPLE_RATE: u32 = 48000;
 

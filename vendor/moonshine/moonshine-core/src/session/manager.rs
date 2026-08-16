@@ -73,6 +73,14 @@ struct SessionManagerInner {
 	video_stream_context: Option<VideoStreamContext>,
 	audio_stream_context: Option<AudioStreamContext>,
 
+	/// Copy of the negotiated video context of the *active* session, kept
+	/// because `video_stream_context` above is taken by `start_session`.
+	/// The host's encoder is outside this crate and needs the negotiated fps
+	/// and bitrate to configure its hardware encoder, so it reads them here
+	/// alongside `video_frame_sender()`. Same lifecycle as `video_frame_tx`:
+	/// set in `start_session`, cleared in `reset_session`.
+	active_video_context: Option<VideoStreamContext>,
+
 	/// Broadcast sender for per-frame encoding statistics.
 	stats_tx: tokio::sync::broadcast::Sender<FrameStats>,
 
@@ -125,6 +133,7 @@ impl SessionManagerInner {
 		self.keys_tx = None;
 		self.video_stream_context = None;
 		self.audio_stream_context = None;
+		self.active_video_context = None;
 		self.video_start_notify = None;
 		self.audio_start_notify = None;
 		self.video_frame_tx = None;
@@ -182,6 +191,7 @@ impl SessionManager {
 			keys_tx: None,
 			video_stream_context: None,
 			audio_stream_context: None,
+			active_video_context: None,
 			stats_tx: tokio::sync::broadcast::channel(256).0,
 			stop_watcher: None,
 			video_start_notify: None,
@@ -230,6 +240,17 @@ impl SessionManager {
 	/// there, alongside the audio stream that owns the receiving end.
 	pub async fn audio_frame_sender(&self) -> Option<mpsc::Sender<Vec<i16>>> {
 		self.inner.lock().await.audio_frame_tx.clone()
+	}
+
+	/// The negotiated video parameters of the active session (fps, bitrate,
+	/// resolution, packet size), for the host's encoder to configure its
+	/// hardware with. These arrive via RTSP ANNOUNCE and are otherwise
+	/// consumed by `start_session()`.
+	///
+	/// `None` until `start_session()` has succeeded, matching
+	/// `video_frame_sender()`.
+	pub async fn active_video_context(&self) -> Option<VideoStreamContext> {
+		self.inner.lock().await.active_video_context.clone()
 	}
 
 	/// Take the receiving end of client recovery requests (IDR / reference
@@ -441,6 +462,10 @@ impl SessionManager {
 		let audio_stream_context = audio_stream_context.ok_or_else(|| {
 			tracing::error!("AudioStreamContext not set");
 		})?;
+		// Kept for the host's encoder, which reads the negotiated fps and
+		// bitrate via `active_video_context()`; the original is moved into
+		// `launched.start()` below.
+		let active_video_context = video_stream_context.clone();
 
 		tracing::info!("Starting session streams.");
 		// Channel the host's encoder feeds via `video_frame_sender()`; the
@@ -493,6 +518,7 @@ impl SessionManager {
 				guard.session = Some(SessionState::Active(active));
 				guard.video_start_notify = Some(video_notify);
 				guard.audio_start_notify = Some(audio_notify);
+				guard.active_video_context = Some(active_video_context);
 				guard.video_frame_tx = Some(frame_tx);
 				guard.audio_frame_tx = Some(audio_frame_tx);
 				guard.encoder_control_rx = Some(control_rx);
