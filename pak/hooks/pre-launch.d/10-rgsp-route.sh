@@ -12,7 +12,11 @@ kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || exit 0
 # If a foreign config is present, leave it alone — the cast was already engaged
 # when casting started, so there's nothing this hook must force.
 if [ -f "$ASOUNDRC" ]; then
-    grep -q '^# rgsp-cast:' "$ASOUNDRC" 2>/dev/null || exit 0
+    if ! grep -q '^# rgsp-cast:' "$ASOUNDRC" 2>/dev/null; then
+        # Foreign config present, log and exit
+        echo "$(date): foreign .asoundrc present, not modifying" >> "$RUN_DIR/pre-launch.log" 2>/dev/null || true
+        exit 0
+    fi
 fi
 
 # Write (or overwrite) only if it's ours or missing

@@ -6,6 +6,11 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 FAIL=0
 
+# Create a single test directory root and set trap once to clean it all
+TEST_ROOT="$TMPDIR/rgsp-test-$$"
+mkdir -p "$TEST_ROOT"
+trap "rm -rf '$TEST_ROOT'" EXIT
+
 # Test 1: Basic syntax and exit 0 with no preconditions
 echo "=== Basic syntax and exit code tests ==="
 for h in "$HERE"/../pak/hooks/*/*.sh; do
@@ -26,9 +31,8 @@ done
 
 # Test 2: boot hook removes stale .asoundrc when daemon is NOT running
 echo "=== Testing boot hook crash recovery ==="
-TESTDIR="$TMPDIR/rgsp-test-boot-$$"
+TESTDIR="$TEST_ROOT/boot"
 mkdir -p "$TESTDIR"
-trap "rm -rf '$TESTDIR'" EXIT
 export RGSP_RUN_DIR="$TESTDIR"
 export USERDATA_PATH="$TESTDIR"
 mkdir -p "$TESTDIR"
@@ -55,9 +59,8 @@ fi
 
 # Test 3: pre-launch hook writes .asoundrc when daemon IS running
 echo "=== Testing pre-launch hook routing ==="
-TESTDIR2="$TMPDIR/rgsp-test-prelaunch-$$"
+TESTDIR2="$TEST_ROOT/prelaunch"
 mkdir -p "$TESTDIR2"
-trap "rm -rf '$TESTDIR' '$TESTDIR2'" EXIT
 export RGSP_RUN_DIR="$TESTDIR2"
 export USERDATA_PATH="$TESTDIR2"
 mkdir -p "$TESTDIR2"
@@ -78,9 +81,8 @@ fi
 
 # Test 3b: pre-launch hook does not overwrite foreign .asoundrc
 echo "=== Testing pre-launch hook does not overwrite foreign config ==="
-TESTDIR2b="$TMPDIR/rgsp-test-prelaunch-foreign-$$"
+TESTDIR2b="$TEST_ROOT/prelaunch-foreign"
 mkdir -p "$TESTDIR2b"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b'" EXIT
 export RGSP_RUN_DIR="$TESTDIR2b"
 export USERDATA_PATH="$TESTDIR2b"
 mkdir -p "$TESTDIR2b"
@@ -109,9 +111,8 @@ fi
 
 # Test 4: pre-sleep hook creates was-casting marker and stops daemon
 echo "=== Testing pre-sleep hook ==="
-TESTDIR3="$TMPDIR/rgsp-test-presleep-$$"
+TESTDIR3="$TEST_ROOT/presleep"
 mkdir -p "$TESTDIR3"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3'" EXIT
 export RGSP_RUN_DIR="$TESTDIR3"
 mkdir -p "$TESTDIR3"
 
@@ -139,9 +140,8 @@ fi
 
 # Test 5a: post-resume hook does not start daemon when no was-casting marker
 echo "=== Testing post-resume hook (no restart case) ==="
-TESTDIR4="$TMPDIR/rgsp-test-postresume-$$"
+TESTDIR4="$TEST_ROOT/postresume"
 mkdir -p "$TESTDIR4"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b' '$TESTDIR3' '$TESTDIR4'" EXIT
 export RGSP_RUN_DIR="$TESTDIR4"
 export RGSP_PAK_DIR="$TESTDIR4/pak"
 mkdir -p "$TESTDIR4" "$TESTDIR4/pak" "$TESTDIR4/bin"
@@ -179,9 +179,8 @@ fi
 
 # Test 5b: post-resume hook removes marker and starts daemon when marker present
 echo "=== Testing post-resume hook (restart case) ==="
-TESTDIR5="$TMPDIR/rgsp-test-postresume-restart-$$"
+TESTDIR5="$TEST_ROOT/postresume-restart"
 mkdir -p "$TESTDIR5"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5'" EXIT
 export RGSP_RUN_DIR="$TESTDIR5"
 export RGSP_PAK_DIR="$TESTDIR5/pak"
 mkdir -p "$TESTDIR5" "$TESTDIR5/pak" "$TESTDIR5/bin"
@@ -231,7 +230,7 @@ fi
 
 # Test 6: boot hook leaves live daemon's .asoundrc alone
 echo "=== Testing boot hook does not remove live daemon's .asoundrc ==="
-TESTDIR5="$TMPDIR/rgsp-test-boot-live-$$"
+TESTDIR6_LIVE="$TEST_ROOT/boot-live"
 mkdir -p "$TESTDIR5"
 trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5'" EXIT
 export RGSP_RUN_DIR="$TESTDIR5"

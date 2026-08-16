@@ -14,11 +14,20 @@ kill -TERM "$PID" 2>/dev/null || true
 
 # Wait for daemon to clean up (remove PID file), with 3-second timeout
 # The stream must be down before device sleeps; a hung hook is worse than slow shutdown
+# Probe for usleep support and adjust iteration count accordingly (fallback must be integer)
+if usleep 1 2>/dev/null; then
+    SLEEP_CMD="usleep 100000"  # 100 ms
+    ITERS=30                   # ~3 s
+else
+    SLEEP_CMD="sleep 1"        # 1 s (integer fallback)
+    ITERS=3                    # ~3 s
+fi
+
 i=0
-while [ $i -lt 30 ]; do
+while [ $i -lt "$ITERS" ]; do
     [ -f "$PID_FILE" ] || exit 0  # Daemon cleaned up, we're done
     i=$((i+1))
-    usleep 100000 2>/dev/null || sleep 0.1
+    $SLEEP_CMD
 done
 
 # Timed out, but don't block the system — log and return anyway

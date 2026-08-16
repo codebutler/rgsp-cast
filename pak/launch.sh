@@ -18,15 +18,18 @@ mkdir -p "$RUN_DIR"
 # The vendor CedarC libraries live in the pak, fetched at install time.
 export LD_LIBRARY_PATH="$PAK_DIR/lib/${PLATFORM:-h700}:$LD_LIBRARY_PATH"
 
-# Detect usleep availability to set appropriate iteration counts for sleep fallback.
-# usleep path: 100ms per iteration → 150 iters = 15s, 50 iters = 5s
-# fallback (sleep 0.25): 250ms per iteration → 60 iters = 15s, 20 iters = 5s
+# Detect usleep availability to set appropriate iteration counts and sleep command.
+# usleep path: 100ms per iteration → 30 iters = 3s, 50 iters = 5s, 150 iters = 15s
+# fallback (sleep 1, integer): 1s per iteration → 3 iters = 3s, 5 iters = 5s, 15 iters = 15s
+# (Fallback must be integer: on BusyBox without FEATURE_FANCY_SLEEP, 0.25 parses as 0)
 if usleep 1 2>/dev/null; then
-    STOP_WAIT_ITERS=150
-    START_WAIT_ITERS=50
+    SLEEP_CMD="usleep 100000"
+    STOP_WAIT_ITERS=150  # ~15 seconds
+    START_WAIT_ITERS=50  # ~5 seconds
 else
-    STOP_WAIT_ITERS=60
-    START_WAIT_ITERS=20
+    SLEEP_CMD="sleep 1"  # Integer fallback
+    STOP_WAIT_ITERS=15   # ~15 seconds
+    START_WAIT_ITERS=5   # ~5 seconds
 fi
 
 show_status() {
@@ -50,9 +53,8 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     PID="$(cat "$PID_FILE")"
     kill -TERM "$PID" 2>/dev/null || true
     # The daemon removes its own pidfile on clean exit; give it up to ~15 seconds.
-    # Use usleep (100ms) with fallback to sleep 0.25 for BusyBox compatibility.
     i=0
-    while [ -f "$PID_FILE" ] && [ $i -lt "$STOP_WAIT_ITERS" ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
+    while [ -f "$PID_FILE" ] && [ $i -lt "$STOP_WAIT_ITERS" ]; do i=$((i+1)); $SLEEP_CMD; done
     # If file is gone, daemon exited cleanly. If still there, leave it alone:
     # the daemon is still shutting down normally. Deleting the file would cause
     # the next launch to start a second instance, which loses the flock.
@@ -69,7 +71,6 @@ else
     ( "$PAK_DIR/rgsp-host" >"$LOG" 2>&1 & )
     i=0
     # Wait up to ~5 seconds for daemon to write PID file.
-    # Use usleep (100ms) with fallback to sleep 0.25 for BusyBox compatibility.
-    while [ ! -f "$PID_FILE" ] && [ $i -lt "$START_WAIT_ITERS" ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
+    while [ ! -f "$PID_FILE" ] && [ $i -lt "$START_WAIT_ITERS" ]; do i=$((i+1)); $SLEEP_CMD; done
     show_status "Casting started"
 fi
