@@ -1,0 +1,59 @@
+.gitignore
+  s_5335a78adb4cf1::t_0d6bfdab267ebd 1-7
+Makefile
+  s_5335a78adb4cf1::t_8b0a1e7ea1bd8e 1-72
+README.md
+  s_5335a78adb4cf1::t_5f9ff9818615f5 1-417
+docs/superpowers/plans/2026-08-15-rgsp-cast-gamestream-host.md
+  s_5335a78adb4cf1::t_2480fd3625b995 1-2380
+reference/stock-kernel-4.9.170.config
+  s_5335a78adb4cf1::t_bcc73eb32f372f 1-4209
+scripts/build-snd-aloop.sh
+  s_5335a78adb4cf1::t_d49b2125c0b74c 1-79
+scripts/extract-vendor-libs.sh
+  s_5c319dde45a577::t_2eb74cbaa10cd8 1-106
+scripts/install-audio-tee.sh
+  s_5c319dde45a577::t_98e98b6fc7b539 1-74
+src/rgsp-audio-pump.c
+  s_28e8ee7cf0b286::t_90a293ff79f0b4 1-136
+src/rgsp-cast.c
+  s_5335a78adb4cf1::t_31ffdcce08bd6c 1-818
+tools/alsa-cap.c
+  s_5c319dde45a577::t_970faff918e29b 1-125
+tools/fmt-probe.c
+  s_5335a78adb4cf1::t_f6a8c2e6bd6225 1-72
+tools/monitor.sh
+  s_5335a78adb4cf1::t_bebcf034ad55c7 1-47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "3bed9c4a55924953a2c3d9e24a57969a5f86ccee",
+  "prompts": {},
+  "sessions": {
+    "s_28e8ee7cf0b286": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0020e-2db2-7ef0-abe5-fc99f2e3150f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_5335a78adb4cf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "26db82e2-b784-45af-a7b4-f0771a3db06b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
