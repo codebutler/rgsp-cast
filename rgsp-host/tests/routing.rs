@@ -33,3 +33,33 @@ fn release_restores_a_preexisting_asoundrc() {
     sink.release().expect("release");
     assert_eq!(std::fs::read_to_string(&asoundrc).unwrap(), original);
 }
+
+#[test]
+fn repeated_engage_release_cycles() {
+    // Test that engage/release cycles work correctly when called multiple times.
+    // Note: This test cannot verify the libmsettings path (SetAudioSink/release on device)
+    // because the library doesn't exist in containers. It only locks in the file-level
+    // behavior. The use-after-free fix (not calling dlclose) would manifest on device
+    // during the second cycle if the fix regressed.
+    let dir = std::env::temp_dir().join("rgsp-routing-test3");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let asoundrc = dir.join(".asoundrc");
+
+    // First cycle
+    let sink1 = CastSink::engage(&dir).expect("first engage");
+    let written1 = std::fs::read_to_string(&asoundrc).expect("first cycle: asoundrc written");
+    assert!(written1.contains("hw:Loopback,0,0"));
+
+    sink1.release().expect("first release");
+    assert!(!asoundrc.exists(), "first release: file removed when there was none before");
+
+    // Second cycle: should work identically
+    let sink2 = CastSink::engage(&dir).expect("second engage");
+    let written2 = std::fs::read_to_string(&asoundrc).expect("second cycle: asoundrc written");
+    assert!(written2.contains("hw:Loopback,0,0"));
+    assert_eq!(written1, written2, "second cycle: written content matches first cycle");
+
+    sink2.release().expect("second release");
+    assert!(!asoundrc.exists(), "second release: file removed when there was none before");
+}

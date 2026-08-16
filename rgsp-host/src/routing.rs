@@ -66,17 +66,40 @@ impl CastSink {
 
         set_audio_sink(AUDIO_SINK_USBDAC);
 
+        // NOTE: Crash window — if the daemon dies between engage() and release(),
+        // .asoundrc stays pointed at the loopback and the handheld has no speaker audio
+        // until something rewrites it. Automatic recovery should live in Task 12's hooks.
+
         Ok(CastSink { asoundrc, previous })
     }
 
     pub fn release(self) -> Result<()> {
-        match &self.previous {
-            Some(body) => std::fs::write(&self.asoundrc, body)
-                .with_context(|| format!("restoring {}", self.asoundrc.display()))?,
-            None => {
-                let _ = std::fs::remove_file(&self.asoundrc);
+        // Check if the file still contains what we wrote before overwriting it.
+        // If a hotplug (e.g., Bluetooth headset) or other audio manager wrote to it
+        // after we engaged, respect that change and don't restore our snapshot.
+        let should_restore = if let Ok(current) = std::fs::read_to_string(&self.asoundrc) {
+            current == ASOUNDRC_BODY
+        } else {
+            // File doesn't exist, so we can "restore" by not creating it
+            self.previous.is_none()
+        };
+
+        if should_restore {
+            match &self.previous {
+                Some(body) => std::fs::write(&self.asoundrc, body)
+                    .with_context(|| format!("restoring {}", self.asoundrc.display()))?,
+                None => {
+                    let _ = std::fs::remove_file(&self.asoundrc);
+                }
             }
+        } else {
+            // File was modified by another audio manager; leave it alone to preserve hotplug
+            log_warn(&format!(
+                "not restoring {} — file was modified during cast (likely hotplug/concurrent manager)",
+                self.asoundrc.display()
+            ));
         }
+
         set_audio_sink(AUDIO_SINK_DEFAULT);
         cleanup_libmsettings();
         Ok(())
@@ -89,9 +112,6 @@ impl CastSink {
 static LIBMSETTINGS_INIT: Once = Once::new();
 static LIBMSETTINGS_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
-// Ensure USERDATA_PATH is set before InitSettings is called
-// InitSettings dereferences getenv("USERDATA_PATH") without NULL checking
-static USERDATA_PATH_INIT: Once = Once::new();
 
 /// Load libmsettings at runtime and call SetAudioSink if available.
 /// libmsettings is only present on the device; this is a no-op in test/build environments.
@@ -121,6 +141,10 @@ fn load_and_init_libmsettings() -> Option<*mut libc::c_void> {
     // 3. Direct path: for testing outside pak or hardcoded fallback paths
 
     // Attempt 1: bare soname (relies on LD_LIBRARY_PATH from pak launch)
+    // Preload libtinyalsa.so.1 first so its symbols are available
+    let tinyalsa_bare = CStr::from_bytes_with_nul(b"libtinyalsa.so.1\0").unwrap();
+    let _ = unsafe { libc::dlopen(tinyalsa_bare.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
+
     let lib_name = CStr::from_bytes_with_nul(b"libmsettings.so\0").unwrap();
     let lib = unsafe { libc::dlopen(lib_name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
     if !lib.is_null() {
@@ -227,23 +251,21 @@ fn try_init_library(lib: *mut libc::c_void, path_desc: &str) -> bool {
 /// If called from a pak, NextUI exports it. If called from boot.d/post-resume.d hooks,
 /// it won't be set, so we provide the device default.
 fn ensure_userdata_path() {
-    USERDATA_PATH_INIT.call_once(|| {
-        // Only set if not already set; if we are launched from a pak, use NextUI's value
-        if std::env::var("USERDATA_PATH").is_err() {
-            // Try to derive from SDCARD_PATH and PLATFORM if available
-            let default_path = if let (Ok(sdcard), Ok(platform)) =
-                (std::env::var("SDCARD_PATH"), std::env::var("PLATFORM"))
-            {
-                format!("{}/.userdata/{}", sdcard, platform)
-            } else {
-                // Fallback: h700 is the RG SP, the only device we support directly
-                "/mnt/SDCARD/.userdata/h700".to_string()
-            };
+    // Only set if not already set; if we are launched from a pak, use NextUI's value
+    if std::env::var("USERDATA_PATH").is_err() {
+        // Try to derive from SDCARD_PATH and PLATFORM if available
+        let default_path = if let (Ok(sdcard), Ok(platform)) =
+            (std::env::var("SDCARD_PATH"), std::env::var("PLATFORM"))
+        {
+            format!("{}/.userdata/{}", sdcard, platform)
+        } else {
+            // Fallback: h700 is the RG SP, the only device we support directly
+            "/mnt/SDCARD/.userdata/h700".to_string()
+        };
 
-            std::env::set_var("USERDATA_PATH", &default_path);
-            log_debug(&format!("USERDATA_PATH set to {}", default_path));
-        }
-    });
+        std::env::set_var("USERDATA_PATH", &default_path);
+        log_debug(&format!("USERDATA_PATH set to {}", default_path));
+    }
 }
 
 fn call_set_audio_sink(lib: *mut libc::c_void, value: i32) {
@@ -266,12 +288,15 @@ fn call_set_audio_sink(lib: *mut libc::c_void, value: i32) {
 }
 
 fn cleanup_libmsettings() {
-    let handle_ptr = LIBMSETTINGS_HANDLE.load(Ordering::Acquire) as *mut libc::c_void;
-    if !handle_ptr.is_null() {
-        unsafe {
-            libc::dlclose(handle_ptr);
-        }
-    }
+    // Do NOT call dlclose() on the library handle. If we close it, the `Once` at
+    // LIBMSETTINGS_INIT will not fire again on the next engage(), so the handle stays
+    // stale and dlsym() will operate on a closed library (use-after-free). This is a
+    // common pattern in long-running daemons where cast sessions repeat: engage(),
+    // release(), engage(), release(), ...
+    //
+    // The kernel unmaps our view of the shared library and its memory at process exit
+    // anyway, so we simply leak the handle reference. This is the correct trade against
+    // a use-after-free crash in a subsequent casting session.
 }
 
 fn get_dlerror() -> String {
