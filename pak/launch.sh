@@ -37,15 +37,11 @@ show_status() {
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     # Already casting: stop.
     PID="$(cat "$PID_FILE")"
-    # For testing: allow alternate stop mechanism (e.g., stop file) via RGSP_STOP_CMD
-    if [ -n "${RGSP_STOP_CMD:-}" ]; then
-        eval "$RGSP_STOP_CMD"
-    else
-        kill -TERM "$PID" 2>/dev/null || true
-    fi
+    kill -TERM "$PID" 2>/dev/null || true
     # The daemon removes its own pidfile on clean exit; give it up to ~15 seconds.
+    # Use usleep (100ms) with fallback to sleep 0.25 for BusyBox compatibility.
     i=0
-    while [ -f "$PID_FILE" ] && [ $i -lt 150 ]; do i=$((i+1)); sleep 0.1; done
+    while [ -f "$PID_FILE" ] && [ $i -lt 150 ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
     # If file is gone, daemon exited cleanly. If still there, leave it alone:
     # the daemon is still shutting down normally. Deleting the file would cause
     # the next launch to start a second instance, which loses the flock.
@@ -61,6 +57,8 @@ else
     # Subshell form matches Cast-Pak precedent and ensures daemon survives pak termination.
     ( "$PAK_DIR/rgsp-host" >"$LOG" 2>&1 & )
     i=0
-    while [ ! -f "$PID_FILE" ] && [ $i -lt 50 ]; do i=$((i+1)); sleep 0.1; done
+    # Wait up to ~5 seconds for daemon to write PID file.
+    # Use usleep (100ms) with fallback to sleep 0.25 for BusyBox compatibility.
+    while [ ! -f "$PID_FILE" ] && [ $i -lt 50 ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
     show_status "Casting started"
 fi

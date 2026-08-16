@@ -6,23 +6,23 @@ TMPBASE="${TMPDIR:-.}"
 TMP=$(mktemp -d "$TMPBASE/test-XXXXXX")
 trap 'rm -rf "$TMP"; killall -9 rgsp-host 2>/dev/null || true' EXIT
 
+# CRITICAL: Verify the committed launch.sh is executable (fix for mode bit regression)
+if ! git ls-tree HEAD pak/launch.sh | grep -q '^100755'; then
+    echo "FAIL: pak/launch.sh is not executable in git repo"
+    exit 1
+fi
+
 mkdir -p "$TMP/pak"
 cp "$HERE/../pak/launch.sh" "$TMP/pak/"
 
-# Stub daemon: responds to STOP file signal (workaround for sandbox signal delivery issues)
+# Stub daemon: trap SIGTERM and remove its own PID file on exit (emulates real daemon).
 cat > "$TMP/pak/rgsp-host" <<'EOF'
 #!/bin/sh
 PIDFILE="$RGSP_RUN_DIR/daemon.pid"
-STOPFILE="$RGSP_RUN_DIR/daemon.stop"
 mkdir -p "$(dirname "$PIDFILE")"
 echo $$ > "$PIDFILE"
-# Poll for stop signal every 0.1s (max 300s, 3000 iterations)
-i=0
-while [ $i -lt 3000 ]; do
-  [ -f "$STOPFILE" ] && { rm -f "$STOPFILE" "$PIDFILE"; exit 0; }
-  sleep 0.1
-  i=$((i+1))
-done
+trap 'rm -f "$PIDFILE"; exit 0' TERM
+sleep 300
 EOF
 chmod +x "$TMP/pak/rgsp-host" "$TMP/pak/launch.sh"
 
@@ -34,8 +34,6 @@ chmod +x "$TMP/bin/show2.elf"
 export PATH="$TMP/bin:$PATH"
 export RGSP_RUN_DIR="$TMP/run"
 export SHARED_USERDATA_PATH="$TMP/userdata"
-# Use stop file mechanism for testing (real daemon uses SIGTERM)
-export RGSP_STOP_CMD="touch $TMP/run/daemon.stop"
 
 echo "--- first launch should start the daemon ---"
 sh "$TMP/pak/launch.sh"
@@ -48,13 +46,14 @@ sleep 1
 if kill -0 "$PID" 2>/dev/null; then echo "FAIL: daemon still running"; exit 1; fi
 [ -f "$TMP/run/daemon.pid" ] && { echo "FAIL: pidfile left behind"; exit 1; }
 
-echo "--- daemon that ignores stop signal should leave pidfile alone ---"
-# Create a new daemon that ignores the STOP file
+echo "--- daemon that ignores SIGTERM should leave pidfile alone ---"
+# Create a new daemon that ignores SIGTERM
 cat > "$TMP/pak/rgsp-host" <<'STUBSTUCK'
 #!/bin/sh
 mkdir -p "$(dirname "$RGSP_RUN_DIR/daemon.pid")"
 echo $$ > "$RGSP_RUN_DIR/daemon.pid"
-# Ignore stop signal, just sleep for 300 seconds
+# Ignore SIGTERM, just keep sleeping
+trap '' TERM
 sleep 300
 STUBSTUCK
 chmod +x "$TMP/pak/rgsp-host"
