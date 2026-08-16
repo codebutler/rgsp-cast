@@ -59,6 +59,10 @@ impl CastSink {
 static LIBMSETTINGS_INIT: Once = Once::new();
 static LIBMSETTINGS_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
+// Ensure USERDATA_PATH is set before InitSettings is called
+// InitSettings dereferences getenv("USERDATA_PATH") without NULL checking
+static USERDATA_PATH_INIT: Once = Once::new();
+
 /// Load libmsettings at runtime and call SetAudioSink if available.
 /// libmsettings is only present on the device; this is a no-op in test/build environments.
 fn set_audio_sink(value: i32) {
@@ -172,7 +176,13 @@ fn try_init_library(lib: *mut libc::c_void, path_desc: &str) -> bool {
         return false;
     }
 
-    // Call InitSettings() to initialize the shared memory segment
+    // Ensure USERDATA_PATH is set before calling InitSettings.
+    // InitSettings does: sprintf(SettingsPath, "%s/msettings.bin", getenv("USERDATA_PATH"))
+    // without checking for NULL, so unset USERDATA_PATH → undefined behaviour segfault.
+    // This happens when daemon is started outside a pak (boot.d, post-resume.d hooks).
+    ensure_userdata_path();
+
+    // Call InitSettings() to initialize the shared memory segment that stores audio settings
     unsafe {
         let init_func: extern "C" fn() = std::mem::transmute(init_sym);
         init_func();
@@ -182,6 +192,30 @@ fn try_init_library(lib: *mut libc::c_void, path_desc: &str) -> bool {
     true
 }
 
+/// Ensure USERDATA_PATH environment variable is set.
+/// InitSettings dereferences getenv("USERDATA_PATH") without a NULL check.
+/// If called from a pak, NextUI exports it. If called from boot.d/post-resume.d hooks,
+/// it won't be set, so we provide the device default.
+fn ensure_userdata_path() {
+    USERDATA_PATH_INIT.call_once(|| {
+        // Only set if not already set; if we are launched from a pak, use NextUI's value
+        if std::env::var("USERDATA_PATH").is_err() {
+            // Try to derive from SDCARD_PATH and PLATFORM if available
+            let default_path = if let (Ok(sdcard), Ok(platform)) =
+                (std::env::var("SDCARD_PATH"), std::env::var("PLATFORM"))
+            {
+                format!("{}/.userdata/{}", sdcard, platform)
+            } else {
+                // Fallback: h700 is the RG SP, the only device we support directly
+                "/mnt/SDCARD/.userdata/h700".to_string()
+            };
+
+            std::env::set_var("USERDATA_PATH", &default_path);
+            log_debug(&format!("USERDATA_PATH set to {}", default_path));
+        }
+    });
+}
+
 fn call_set_audio_sink(lib: *mut libc::c_void, value: i32) {
     use std::ffi::CStr;
 
@@ -189,8 +223,11 @@ fn call_set_audio_sink(lib: *mut libc::c_void, value: i32) {
     let sym = unsafe { libc::dlsym(lib, sym_name.as_ptr()) };
 
     if !sym.is_null() {
-        // SetAudioSink calls SetVolume(GetVolume()) internally, which affects the device's
-        // audio mixer. This is intentional — it's how the sink change takes effect on the device.
+        // SetAudioSink is not cosmetic — it:
+        // 1. Updates audiosink in the shared settings struct
+        // 2. Calls SetVolume(GetVolume()) to apply the change to the mixer
+        // 3. Calls SaveSettings() to write msettings.bin to disk
+        // This is real: the mixer level changes and the setting persists across reboots.
         unsafe {
             let func: extern "C" fn(i32) = std::mem::transmute(sym);
             func(value);
