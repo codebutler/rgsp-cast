@@ -1,0 +1,7 @@
+bin/
+vendor-libs/
+.firmware-cache/
+*.h264
+*.mp4
+*.log
+.DS_Store

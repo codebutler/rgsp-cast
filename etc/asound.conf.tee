@@ -1,0 +1,113 @@
+# /etc/asound.conf — with an rgsp-cast capture tap.
+#
+# The stock default PCM is preserved verbatim below as "rgsp_out" (its ctl_elems
+# hooks unmute LINEOUT/SPK and set digital volume, so it must not be bypassed).
+# "default" now points at a `type file` plugin in PIPE mode: a filename
+# beginning with "|" is run as a command with the audio on its stdin
+# (alsa-lib pcm_file.c:236, popen). Nothing is written to disk.
+#
+# The command is deliberately written so a live reader always exists:
+#
+#   rgsp-audio-pump ... ; exec cat >/dev/null
+#
+# popen runs this through `sh -c`. If the pump binary is missing, or it exits
+# or crashes at any point, the shell falls through to `cat`, which drains the
+# pipe forever. That matters because pcm_file has no way to ignore a failed
+# write: ENOSPC or EPIPE propagates out of the plugin into the application
+# (pcm_file.c:441-446 -> :493-495) and kills game audio. With this fallback the
+# worst case is that audio is discarded, never that playback breaks.
+#
+# Audio is whatever the client opens; NextUI/minarch uses S16_LE 48000 Hz
+# stereo. rgsp-cast connects to /tmp/rgsp-audio.sock to receive it.
+#
+# The tap attaches when a client OPENS the PCM, so changes only take effect for
+# the next audio client — relaunch the game.
+#
+# To disable: restore /etc/asound.conf.orig
+
+pcm.!default {
+	type file
+	slave.pcm "rgsp_out"
+	file "|/mnt/SDCARD/.userdata/h700/rgsp/rgsp-audio-pump 2>/dev/null; exec cat >/dev/null"
+	format raw
+}
+
+# ── stock default, renamed ────────────────────────────────────────────────
+pcm.rgsp_out {
+	type hooks
+	slave.pcm "hw:audiocodec"
+	hooks.0 {
+	type ctl_elems
+	hook_args [
+		{
+			name "LINEOUT Switch"
+			preserve true
+			lock true
+			value 1
+		}
+		{
+			name "SPK Switch"
+			preserve true
+			lock true
+			value 1
+		}
+		{
+			name "OutputL Mixer DACL Switch"
+			preserve true
+			lock true
+			value 1
+		}
+		{
+            name "OutputR Mixer DACR Switch"
+            preserve true
+			lock true
+            value 1
+        }
+		{
+            name "digital volume"
+            preserve true
+			lock true
+            value 63
+        }
+	]
+	}
+}
+
+pcm.playback_hp {
+	type hooks
+	slave.pcm "hw:audiocodec"
+	hooks.0 {
+	type ctl_elems
+	hook_args [
+		{
+            name "LINEOUT Switch"
+            preserve true
+			lock true
+            value 1
+        }
+		{
+            name "OutputL Mixer DACL Switch"
+            preserve true
+			lock true
+            value 1
+        }
+		{
+            name "OutputR Mixer DACR Switch"
+            preserve true
+			lock true
+            value 1
+        }
+		{
+            name "digital volume"
+            preserve true
+			lock true
+            value 63
+        }
+	]
+	}
+}
+
+pcm.playback_hdmi {
+	type hw
+	card ahubhdmi
+}
