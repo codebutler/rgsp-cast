@@ -35,6 +35,12 @@ bin/test-capture-api: tests/test_capture_api.c librgspcast.a
 		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
 		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
 
+bin/test-idr-cadence: tests/test_idr_cadence.c librgspcast.a
+	@mkdir -p bin
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
+		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
+		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
+
 bin/rgsp-audio-pump: src/rgsp-audio-pump.c
 	@mkdir -p bin
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
