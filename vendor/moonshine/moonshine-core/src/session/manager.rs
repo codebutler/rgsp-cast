@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_shutdown::ShutdownManager;
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
 use crate::ShutdownReason;
 use crate::session::FrameStats;
@@ -14,6 +14,7 @@ use crate::session::SessionState;
 use crate::session::stream::audio::AudioStreamConfig;
 use crate::session::stream::audio::AudioStreamContext;
 use crate::session::stream::control::ControlStreamConfig;
+use crate::session::stream::video::EncodedFrame;
 use crate::session::stream::video::VideoStreamConfig;
 use crate::session::stream::video::VideoStreamContext;
 
@@ -78,6 +79,10 @@ struct SessionManagerInner {
 	/// Notify to trigger the video pipeline start (used by bench / external callers).
 	video_start_notify: Option<Arc<tokio::sync::Notify>>,
 
+	/// Sender for encoded video frames, handed to the host's encoder once the
+	/// video stream is active. `None` until `start_session()` succeeds.
+	video_frame_tx: Option<mpsc::Sender<EncodedFrame>>,
+
 	/// Notify to trigger the audio pipeline start (used by bench / external callers).
 	audio_start_notify: Option<Arc<tokio::sync::Notify>>,
 
@@ -106,6 +111,7 @@ impl SessionManagerInner {
 		self.audio_stream_context = None;
 		self.video_start_notify = None;
 		self.audio_start_notify = None;
+		self.video_frame_tx = None;
 		self.stop = ShutdownManager::new();
 	}
 }
@@ -162,6 +168,7 @@ impl SessionManager {
 			stop_watcher: None,
 			video_start_notify: None,
 			audio_start_notify: None,
+			video_frame_tx: None,
 			shutdown: shutdown.clone(),
 			_trigger_token: trigger_token,
 			_delay_token: delay_token,
@@ -179,6 +186,15 @@ impl SessionManager {
 	/// Multiple receivers can be created — each receives a copy of every message.
 	pub fn bench_stats_receiver(&self) -> tokio::sync::broadcast::Receiver<FrameStats> {
 		self.stats_tx.subscribe()
+	}
+
+	/// Sender for encoded video frames, for the host's encoder to feed once
+	/// the video stream is active.
+	///
+	/// `None` until `start_session()` has succeeded — the channel is created
+	/// there, alongside the video stream that owns the receiving end.
+	pub async fn video_frame_sender(&self) -> Option<mpsc::Sender<EncodedFrame>> {
+		self.inner.lock().await.video_frame_tx.clone()
 	}
 
 	/// Trigger the video and audio pipelines to start encoding.
@@ -376,6 +392,9 @@ impl SessionManager {
 		})?;
 
 		tracing::info!("Starting session streams.");
+		// Channel the host's encoder feeds via `video_frame_sender()`; the
+		// receiving end is handed to the video stream's packetize loop.
+		let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(4);
 		let mut guard = self.inner.lock().await;
 		let video_config = guard.video_config.clone();
 		let stream_timeout = guard.stream_timeout;
@@ -385,6 +404,7 @@ impl SessionManager {
 				stream_timeout,
 				video_stream_context,
 				audio_stream_context,
+				frame_rx,
 				stop,
 			)
 			.await
@@ -393,6 +413,7 @@ impl SessionManager {
 				guard.session = Some(SessionState::Active(active));
 				guard.video_start_notify = Some(video_notify);
 				guard.audio_start_notify = Some(audio_notify);
+				guard.video_frame_tx = Some(frame_tx);
 				Ok(())
 			},
 			Err(()) => {

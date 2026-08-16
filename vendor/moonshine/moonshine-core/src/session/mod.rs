@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use async_shutdown::ShutdownManager;
 use manager::SessionShutdownReason;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::session::stream::audio::AudioChannels;
 use crate::session::stream::audio::AudioStream;
 use crate::session::stream::audio::AudioStreamContext;
 use crate::session::stream::control::ControlStream;
 use crate::session::stream::control::ControlStreamContext;
+use crate::session::stream::video::EncodedFrame;
 use crate::session::stream::video::FrameStats;
 use crate::session::stream::video::HdrModeState;
 use crate::session::stream::video::VideoStream;
@@ -200,6 +201,7 @@ impl LaunchedSession {
 		stream_timeout: u64,
 		video_ctx: VideoStreamContext,
 		audio_ctx: AudioStreamContext,
+		frame_rx: mpsc::Receiver<EncodedFrame>,
 		stop: ShutdownManager<SessionShutdownReason>,
 	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>), ()> {
 		let Self {
@@ -219,7 +221,7 @@ impl LaunchedSession {
 
 		// Start video stream — gated, returns VideoStreamHandle.
 		let video_handle = video_stream
-			.start(video_config, video_ctx, keys_rx.clone(), stop.clone())
+			.start(video_config, video_ctx, keys_rx.clone(), frame_rx, stop.clone())
 			.map_err(|()| tracing::error!("Failed to start video stream"))?;
 
 		// Start audio stream — gated, returns AudioStartHandle.

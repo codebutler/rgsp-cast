@@ -11,7 +11,22 @@ pub mod gso_socket;
 pub mod packetizer;
 pub mod shard_batch;
 use gso_socket::UdpGsoSocket;
+use packetizer::Packetizer;
 use shard_batch::ShardBatch;
+
+/// One encoded video frame, produced outside the crate by the host's
+/// hardware encoder (the Cedar video engine on the RG SP) and fed into
+/// `VideoStream::start`'s `frame_rx` for packetizing.
+///
+/// Replaces the deleted Vulkan `VideoPipeline`'s `ExportedFrame` as the
+/// frame source: the host now supplies pre-encoded bytes directly instead
+/// of exporting DMA-BUFs for GPU encode.
+pub struct EncodedFrame {
+	pub data: Vec<u8>,
+	pub is_key_frame: bool,
+	pub frame_number: u32,
+	pub rtp_timestamp: u32,
+}
 
 /// Static HDR metadata (HDR10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,14 +348,16 @@ impl VideoStream {
 	#[allow(clippy::too_many_arguments)]
 	pub fn start(
 		self,
-		_config: VideoStreamConfig,
+		config: VideoStreamConfig,
 		context: VideoStreamContext,
-		_keys_rx: SessionKeysReceiver,
+		keys_rx: SessionKeysReceiver,
+		frame_rx: mpsc::Receiver<EncodedFrame>,
 		stop: ShutdownManager<SessionShutdownReason>,
 	) -> Result<VideoStreamHandle, ()> {
-		// The Vulkan encode pipeline that produced `ShardBatch`es, consumed the
-		// compositor frames and published HDR metadata was removed with the
-		// compositor; the host binary supplies encoded frames instead.
+		// The Vulkan encode pipeline that both encoded frames and packetized
+		// them was removed with the compositor. Encoding now happens outside
+		// the crate (the host's Cedar encoder feeds `frame_rx`); packetizing
+		// stays here, in the protocol layer, via `spawn_packetize_frames`.
 		let Self {
 			socket,
 			hdr_metadata_tx: _hdr_metadata_tx,
@@ -352,7 +369,7 @@ impl VideoStream {
 			let _ = socket.set_tos_v4(160);
 		}
 
-		// Gate for pipeline + packet handler.
+		// Gate for packetize loop + packet handler.
 		let start_notify = Arc::new(Notify::new());
 
 		// IDR broadcast channel.
@@ -365,12 +382,23 @@ impl VideoStream {
 		// Stream-reset broadcast channel (client reconnect/resume).
 		let (reset_tx, _reset_rx) = broadcast::channel(1);
 
-		// Packet channel. The producer side has no in-crate owner now that the
-		// Vulkan pipeline is gone.
-		let (_packet_tx, packet_rx) = mpsc::channel::<ShardBatch>(128);
+		// Packet channel, produced by the packetize loop below and consumed
+		// by the packet handler that owns the socket.
+		let (packet_tx, packet_rx) = mpsc::channel::<ShardBatch>(128);
 
 		// Spawn packet handler — gated behind start_notify.
 		spawn_handle_video_packets(packet_rx, socket, start_notify.clone(), stop.clone());
+
+		// Spawn packetize loop — gated behind start_notify.
+		spawn_packetize_frames(
+			frame_rx,
+			config,
+			context,
+			keys_rx,
+			packet_tx,
+			start_notify.clone(),
+			stop,
+		);
 
 		Ok(VideoStreamHandle {
 			notify: start_notify,
@@ -379,6 +407,76 @@ impl VideoStream {
 			reset_tx,
 		})
 	}
+}
+
+/// Packetize each `EncodedFrame` from the host's encoder into `ShardBatch`es
+/// and forward them to the packet handler.
+///
+/// This is a minimal replacement for the deleted Vulkan `VideoPipeline`'s
+/// encode+packetize loop, covering only packetizing: the host now supplies
+/// pre-encoded frames, so there is no GPU encode, HDR metadata, or per-frame
+/// latency stats to produce here. IDR / reference-invalidation / reset
+/// requests are not consumed by this loop — they must reach the host's
+/// encoder directly, which is outside this crate.
+fn spawn_packetize_frames(
+	mut frame_rx: mpsc::Receiver<EncodedFrame>,
+	config: VideoStreamConfig,
+	context: VideoStreamContext,
+	keys_rx: SessionKeysReceiver,
+	packet_tx: mpsc::Sender<ShardBatch>,
+	start: Arc<Notify>,
+	stop_session_manager: ShutdownManager<SessionShutdownReason>,
+) {
+	tokio::spawn(async move {
+		start.notified().await;
+
+		let mut packetizer = Packetizer::new(context.encrypt_video, keys_rx);
+		packetizer.warm_up(config.fec_percentage, context.minimum_fec_packets);
+		let mut sequence_number: u32 = 0;
+
+		// Trigger session shutdown if we exit unexpectedly.
+		let _stop_token = stop_session_manager.trigger_shutdown_token(SessionShutdownReason::VideoEncoderStopped);
+		let _delay_stop = stop_session_manager.delay_shutdown_token();
+
+		while !stop_session_manager.is_shutdown_triggered() {
+			let frame = match stop_session_manager.wrap_cancel(frame_rx.recv()).await {
+				Ok(Some(frame)) => frame,
+				Ok(None) => {
+					tracing::debug!("Encoded frame channel closed.");
+					break;
+				},
+				Err(_) => break,
+			};
+
+			let batch = match packetizer.packetize(
+				&frame.data,
+				frame.is_key_frame,
+				context.packet_size,
+				context.minimum_fec_packets,
+				config.fec_percentage,
+				frame.frame_number,
+				&mut sequence_number,
+				frame.rtp_timestamp,
+				0,
+			) {
+				Ok(batch) => batch,
+				Err(()) => {
+					tracing::warn!("Failed to packetize frame {}.", frame.frame_number);
+					continue;
+				},
+			};
+
+			match stop_session_manager.wrap_cancel(packet_tx.send(batch)).await {
+				Ok(Ok(())) => {},
+				Ok(Err(_)) | Err(_) => {
+					tracing::debug!("Packet handler stopped, exiting packetize loop.");
+					break;
+				},
+			}
+		}
+
+		tracing::debug!("Video packetize loop stopped.");
+	});
 }
 
 fn spawn_handle_video_packets(
