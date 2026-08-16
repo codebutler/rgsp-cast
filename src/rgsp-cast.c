@@ -1,8 +1,11 @@
 /*
- * rgsp-cast — hardware H.264 capture of the RG SP framebuffer.
+ * librgspcast — hardware H.264 capture of the RG SP framebuffer.
  *
  * Reads /dev/fb0 read-only and encodes with the Allwinner Cedar VE via the
- * vendor CedarC libraries (dlopen'd at runtime, never linked).
+ * vendor CedarC libraries (dlopen'd at runtime, never linked). The CLI that
+ * used to live here is now src/rgsp-cast-cli.c; this file is the library
+ * behind include/rgsp_cast.h, so it never calls exit() — failures land in a
+ * static error buffer and come back as NULL / -1.
  *
  * The VE ingests the framebuffer's pixel format directly and does RGB->YUV in
  * its ISP block, so there is no CPU colour conversion: 1.55 ms/frame of memcpy
@@ -30,26 +33,41 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <dlfcn.h>
-#include <signal.h>
 #include <time.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <linux/fb.h>
+
+#include "rgsp_cast_internal.h"
 
 /* ── logging ─────────────────────────────────────────────────────────────── */
 
 static int g_verbose;
 #define LOG(...)  do { fprintf(stderr, "[rgsp-cast] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define VLOG(...) do { if (g_verbose) LOG(__VA_ARGS__); } while (0)
+
+/* Fatal paths used to LOG and exit; as a library they record here and fail. */
+static char g_last_error[256];
+
+static void set_error(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_last_error, sizeof g_last_error, fmt, ap);
+    va_end(ap);
+}
+
+const char *rgsp_capture_last_error(void) { return g_last_error; }
+
+void rgsp_capture_set_verbose(int v) { g_verbose = v; }
 
 /* ── vendor ABI ──────────────────────────────────────────────────────────── */
 
@@ -171,6 +189,7 @@ typedef int  (*fn_GetOneBitstreamFrame)(VideoEncoder *, VencOutputBuffer *);
 typedef int  (*fn_FreeOneBitStreamFrame)(VideoEncoder *, VencOutputBuffer *);
 typedef int  (*fn_AlreadyUsedInputBuffer)(VideoEncoder *, VencInputBuffer *);
 typedef int  (*fn_VideoEncGetParameter)(VideoEncoder *, int, void *);
+typedef int  (*fn_VideoEncSetParameter)(VideoEncoder *, int, void *);
 typedef void *(*fn_GetVeOpsS)(int);
 typedef void *(*fn_GetOpsS)(void);
 
@@ -192,21 +211,24 @@ static fn_GetOneBitstreamFrame       p_GetOneBitstreamFrame;
 static fn_FreeOneBitStreamFrame      p_FreeOneBitStreamFrame;
 static fn_AlreadyUsedInputBuffer     p_AlreadyUsedInputBuffer;
 static fn_VideoEncGetParameter       p_VideoEncGetParameter;
+static fn_VideoEncSetParameter       p_VideoEncSetParameter;
 
 #define LOADSYM(h, var, name)                                            \
     do {                                                                 \
         *(void **)(&(var)) = dlsym((h), (name));                         \
-        if (!(var)) { LOG("missing symbol %s", (name)); return -1; }      \
+        if (!(var)) { set_error("missing symbol %s", (name)); return -1; }\
     } while (0)
 
 static int load_libs(void)
 {
+    if (g_libvenc) return 0;   /* already loaded */
+
     g_libVE = dlopen("libVE.so", RTLD_LAZY | RTLD_GLOBAL);
-    if (!g_libVE)  { LOG("dlopen(libVE.so): %s", dlerror()); return -1; }
+    if (!g_libVE)  { set_error("dlopen(libVE.so): %s", dlerror()); return -1; }
     g_libMem = dlopen("libMemAdapter.so", RTLD_LAZY | RTLD_GLOBAL);
-    if (!g_libMem) { LOG("dlopen(libMemAdapter.so): %s", dlerror()); return -1; }
+    if (!g_libMem) { set_error("dlopen(libMemAdapter.so): %s", dlerror()); return -1; }
     g_libvenc = dlopen("libvencoder.so", RTLD_LAZY | RTLD_GLOBAL);
-    if (!g_libvenc){ LOG("dlopen(libvencoder.so): %s", dlerror()); return -1; }
+    if (!g_libvenc){ set_error("dlopen(libvencoder.so): %s", dlerror()); return -1; }
 
     LOADSYM(g_libvenc, p_VideoEncCreate,             "VideoEncCreate");
     LOADSYM(g_libvenc, p_VideoEncInit,               "VideoEncInit");
@@ -225,6 +247,7 @@ static int load_libs(void)
     LOADSYM(g_libvenc, p_AlreadyUsedInputBuffer,     "AlreadyUsedInputBuffer");
     /* optional */
     *(void **)(&p_VideoEncGetParameter) = dlsym(g_libvenc, "VideoEncGetParameter");
+    *(void **)(&p_VideoEncSetParameter) = dlsym(g_libvenc, "VideoEncSetParameter");
     return 0;
 }
 
@@ -305,9 +328,6 @@ static void rgb565_to_nv12(const uint8_t *src, unsigned pitch,
 
 /* ── misc ────────────────────────────────────────────────────────────────── */
 
-static volatile sig_atomic_t g_stop;
-static void on_signal(int s) { (void)s; g_stop = 1; }
-
 static long long now_ns(void)
 {
     struct timespec ts;
@@ -315,36 +335,101 @@ static long long now_ns(void)
     return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-static void hexdump(const char *tag, const unsigned char *p, int n)
+/* ── capture object ──────────────────────────────────────────────────────── */
+
+struct rgsp_capture {
+    /* framebuffer */
+    int       fb_fd;
+    unsigned  w, h, bpp, pitch;
+    size_t    frame_bytes;
+    uint8_t  *fb_buf;
+
+    /* encoder */
+    VideoEncoder    *enc;
+    ScMemOpsS       *memops;
+    int              mem_open, buffers_alloced, enc_inited;
+    VencInputBuffer  inbuf, used;
+    VencInputBuffer *held;          /* input buffer currently checked out */
+    int              in_fmt, rgb_in;
+
+    /* Annex-B output, reused across frames; grows on demand. */
+    unsigned char *out_buf;
+    size_t         out_cap, out_len;
+
+    unsigned char sps_pps[512];
+    unsigned      sps_pps_len;
+    int           sps_pps_fetched;
+
+    /* pacing and counters */
+    int       fps;
+    long      frame_ns;
+    long long deadline;
+    int       frames;
+    int       force_idr;
+    int       short_reads;
+    long long convert_ns, encode_ns;
+};
+
+/* Append AVCC (4-byte length prefixes) to the output buffer as Annex-B start
+ * codes. Returns bytes written, or 0 if the buffer does not parse as AVCC — in
+ * which case the caller should append it untouched. */
+static int out_reserve(rgsp_capture *c, size_t extra)
 {
-    fprintf(stderr, "[rgsp-cast] %s:", tag);
-    for (int i = 0; i < n; i++) fprintf(stderr, " %02x", p[i]);
-    fputc('\n', stderr);
+    if (c->out_len + extra <= c->out_cap) return 0;
+    size_t cap = c->out_cap ? c->out_cap : 65536;
+    while (cap < c->out_len + extra) cap *= 2;
+    unsigned char *p = realloc(c->out_buf, cap);
+    if (!p) { set_error("out of memory growing output buffer to %zu", cap); return -1; }
+    c->out_buf = p;
+    c->out_cap = cap;
+    return 0;
 }
 
-/* Rewrite AVCC (4-byte length prefixes) into Annex-B start codes, in place of
- * a straight copy. Returns bytes written, or 0 if the buffer does not parse as
- * AVCC — in which case the caller should write it through untouched. */
-static size_t write_avcc_as_annexb(FILE *f, const unsigned char *d, size_t n)
+static int out_append(rgsp_capture *c, const unsigned char *d, size_t n)
+{
+    if (out_reserve(c, n) != 0) return -1;
+    memcpy(c->out_buf + c->out_len, d, n);
+    c->out_len += n;
+    return 0;
+}
+
+static size_t append_avcc_as_annexb(rgsp_capture *c, const unsigned char *d, size_t n)
 {
     static const unsigned char start[4] = { 0, 0, 0, 1 };
     size_t off = 0, written = 0;
 
     /* Already Annex-B? Pass through. */
     if (n >= 4 && d[0] == 0 && d[1] == 0 && d[2] == 0 && d[3] == 1) {
-        fwrite(d, 1, n, f);
+        if (out_append(c, d, n) != 0) return written;
         return n;
     }
     while (off + 4 <= n) {
         size_t len = ((size_t)d[off] << 24) | ((size_t)d[off+1] << 16) |
                      ((size_t)d[off+2] << 8) | d[off+3];
         if (len == 0 || off + 4 + len > n) return written;  /* not AVCC */
-        fwrite(start, 1, 4, f);
-        fwrite(d + off + 4, 1, len, f);
+        if (out_append(c, start, 4) != 0) return written;
+        if (out_append(c, d + off + 4, len) != 0) return written;
         written += 4 + len;
         off += 4 + len;
     }
     return written;
+}
+
+/* An IDR frame is one whose first slice NAL has type 5. Parameter sets (7, 8),
+ * SEI (6) and access-unit delimiters (9) are skipped. */
+static int annexb_first_slice_is_idr(const unsigned char *d, size_t n)
+{
+    size_t i = 0;
+    while (i + 4 <= n) {
+        size_t sc = 0;
+        if (d[i] == 0 && d[i+1] == 0 && d[i+2] == 0 && d[i+3] == 1)      sc = 4;
+        else if (d[i] == 0 && d[i+1] == 0 && d[i+2] == 1)                sc = 3;
+        if (!sc || i + sc >= n) { i++; continue; }
+        unsigned type = d[i + sc] & 0x1f;
+        if (type == 1 || type == 5) return type == 5;
+        i += sc;
+    }
+    return 0;
 }
 
 /* Fetch the H.264 parameter sets.
@@ -419,96 +504,59 @@ static unsigned fetch_sps_pps(VideoEncoder *enc, ScMemOpsS *memops,
     return hdr.nLength;
 }
 
-static void usage(const char *argv0)
+/* ── public API ──────────────────────────────────────────────────────────── */
+
+/* Same enum block as VENC_IndexParamH264SPSPPS above: the generic parameters
+ * start at 0, the H.264-specific ones at 0x100. */
+#define VENC_IndexParamBitrate       0x0
+#define VENC_IndexParamForceKeyFrame 0x6
+
+rgsp_capture *rgsp_capture_open_ex(int width, int height, int fps, int bitrate,
+                                   int in_fmt, int stride_bytes)
 {
-    fprintf(stderr,
-        "usage: %s [-o FILE] [-d SECS] [-f FPS] [-n FRAMES] [--dump-hdr] [-v]\n"
-        "  -o FILE     output Annex-B .h264            (default cast.h264)\n"
-        "  -i FMT      input format: 12=ARGB passthrough (default), 0=NV12\n"
-        "  -a PATH     audio source: pump socket or tee file\n"
-        "              (default /tmp/rgsp-audio.sock)\n"
-        "  -A          video only, ignore audio\n"
-        "  -d SECS     capture duration in seconds     (default 30)\n"
-        "  -f FPS      target frame rate               (default 30)\n"
-        "  -n FRAMES   stop after N frames             (overrides -d)\n"
-        "  --dump-hdr  dump the raw SPS/PPS parameter struct and exit\n"
-        "  -v          verbose per-frame logging\n",
-        argv0);
-}
+    g_last_error[0] = '\0';
 
-/* ── main ────────────────────────────────────────────────────────────────── */
-
-int main(int argc, char **argv)
-{
-    const char *out_path = "cast.h264";
-    int duration = 30, fps = 30, max_frames = 0, dump_hdr = 0;
-    /* Default: hand the framebuffer to the VE untouched. Allwinner names the
-     * formats by 32-bit word order, so VENC_PIXEL_ARGB (12) is the one whose
-     * byte layout is B,G,R,A — exactly /dev/fb0. Verified against the CPU
-     * conversion path at 42.2 dB PSNR on identical screen content.
-     * Use -i 0 for the NV12 reference path (11.8x more CPU). */
-    int in_fmt = VENC_PIXEL_ARGB;
-    int stride_bytes = 0;               /* -S: pass stride in bytes not pixels */
-    const char *audio_tee = "/tmp/rgsp-audio.sock"; /* -a: pump socket or tee file */
-    int audio_off = 0;                  /* -A: video only */
-    int rc = 1;
-
-    for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "-o") && i + 1 < argc) out_path   = argv[++i];
-        else if (!strcmp(argv[i], "-d") && i + 1 < argc) duration   = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-f") && i + 1 < argc) fps        = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-n") && i + 1 < argc) max_frames = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-i") && i + 1 < argc) in_fmt     = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-a") && i + 1 < argc) audio_tee  = argv[++i];
-        else if (!strcmp(argv[i], "-A"))                 audio_off  = 1;
-        else if (!strcmp(argv[i], "-S"))                 stride_bytes = 1;
-        else if (!strcmp(argv[i], "--dump-hdr"))         dump_hdr   = 1;
-        else if (!strcmp(argv[i], "-v"))                 g_verbose  = 1;
-        else { usage(argv[0]); return 2; }
-    }
     if (fps <= 0) fps = 30;
-    if (max_frames <= 0) max_frames = duration * fps;
 
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
+    rgsp_capture *c = calloc(1, sizeof *c);
+    if (!c) { set_error("out of memory"); return NULL; }
+    c->fb_fd  = -1;
+    c->in_fmt = in_fmt;
+    c->fps    = fps;
 
-    /* Resources, released in reverse order at `done`. */
-    int             fb_fd  = -1;
-    FILE           *out    = NULL;
-    uint8_t        *fb_buf = NULL;
-    VideoEncoder   *enc    = NULL;
-    int             audio_fd = -1;
-    FILE           *audio_out = NULL;
-    char            audio_path[512] = {0};
-    long long       audio_bytes = 0;
-    ScMemOpsS      *memops = NULL;
-    int             mem_open = 0, buffers_alloced = 0, enc_inited = 0;
-    VencInputBuffer *held  = NULL;      /* input buffer currently checked out */
-    VencInputBuffer  inbuf, used;
-
-    if (load_libs() != 0) goto done;
+    if (load_libs() != 0) goto fail;
 
     /* ── framebuffer ─────────────────────────────────────────────────── */
-    fb_fd = open("/dev/fb0", O_RDONLY);
-    if (fb_fd < 0) { LOG("open(/dev/fb0): %s", strerror(errno)); goto done; }
+    c->fb_fd = open("/dev/fb0", O_RDONLY);
+    if (c->fb_fd < 0) { set_error("open(/dev/fb0): %s", strerror(errno)); goto fail; }
 
     struct fb_var_screeninfo vinfo;
     struct fb_fix_screeninfo finfo;
-    if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0 ||
-        ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo) < 0) {
-        LOG("FBIOGET_*SCREENINFO: %s", strerror(errno));
-        goto done;
+    if (ioctl(c->fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0 ||
+        ioctl(c->fb_fd, FBIOGET_FSCREENINFO, &finfo) < 0) {
+        set_error("FBIOGET_*SCREENINFO: %s", strerror(errno));
+        goto fail;
     }
 
     unsigned w = vinfo.xres, h = vinfo.yres, bpp = vinfo.bits_per_pixel;
     unsigned pitch = finfo.line_length;
-    if (bpp != 32 && bpp != 16) { LOG("unsupported bpp %u", bpp); goto done; }
+    if (bpp != 32 && bpp != 16) { set_error("unsupported bpp %u", bpp); goto fail; }
     /* The VE wants 16-aligned dimensions; 720x480 already satisfies this. */
     if (w % 16 || h % 16) LOG("warning: %ux%u is not 16-aligned, VE may reject it", w, h);
 
-    size_t frame_bytes = (size_t)pitch * h;
-    fb_buf = malloc(frame_bytes);
-    if (!fb_buf) { LOG("out of memory for framebuffer copy"); goto done; }
+    /* The encoder path has only ever run at the panel's native geometry, and
+     * asking the VE to scale is an untested path. Callers that pass a size say
+     * what they expect; disagreeing with the panel is an error, not a resize. */
+    if ((width > 0 && (unsigned)width != w) || (height > 0 && (unsigned)height != h)) {
+        set_error("requested %dx%d but the framebuffer is %ux%u; scaling is not supported",
+                  width, height, w, h);
+        goto fail;
+    }
+
+    c->w = w; c->h = h; c->bpp = bpp; c->pitch = pitch;
+    c->frame_bytes = (size_t)pitch * h;
+    c->fb_buf = malloc(c->frame_bytes);
+    if (!c->fb_buf) { set_error("out of memory for framebuffer copy"); goto fail; }
 
     /* Two optimisations were measured here and both are worse — do not retry
      * them without new information:
@@ -535,19 +583,33 @@ int main(int argc, char **argv)
     /* ── encoder ─────────────────────────────────────────────────────── */
     fn_GetVeOpsS get_ve = (fn_GetVeOpsS)dlsym(g_libVE, "GetVeOpsS");
     fn_GetOpsS   get_mem = (fn_GetOpsS)dlsym(g_libMem, "MemAdapterGetOpsS");
-    if (!get_ve || !get_mem) { LOG("GetVeOpsS / MemAdapterGetOpsS missing"); goto done; }
+    if (!get_ve || !get_mem) { set_error("GetVeOpsS / MemAdapterGetOpsS missing"); goto fail; }
 
     void *veops = get_ve(0);
-    memops = (ScMemOpsS *)get_mem();
-    if (!veops || !memops) { LOG("ops NULL"); goto done; }
-    if (memops->open() < 0) { LOG("CdcMemOpen failed"); goto done; }
-    mem_open = 1;
+    c->memops = (ScMemOpsS *)get_mem();
+    if (!veops || !c->memops) { set_error("ops NULL"); goto fail; }
+    if (c->memops->open() < 0) { set_error("CdcMemOpen failed"); goto fail; }
+    c->mem_open = 1;
 
-    if (memops->get_ve_addr_offset)
-        LOG("ve_addr_offset=0x%x", memops->get_ve_addr_offset());
+    if (c->memops->get_ve_addr_offset)
+        LOG("ve_addr_offset=0x%x", c->memops->get_ve_addr_offset());
 
-    enc = p_VideoEncCreate(VENC_CODEC_H264);
-    if (!enc) { LOG("VideoEncCreate failed"); goto done; }
+    c->enc = p_VideoEncCreate(VENC_CODEC_H264);
+    if (!c->enc) { set_error("VideoEncCreate failed"); goto fail; }
+
+    /* Bitrate is a generic parameter, applied by VideoEncInit. 0 leaves the
+     * encoder default alone, which is what the CLI has always used. */
+    if (bitrate > 0) {
+        if (!p_VideoEncSetParameter) {
+            set_error("VideoEncSetParameter missing; cannot set bitrate");
+            goto fail;
+        }
+        int br = bitrate;
+        if (p_VideoEncSetParameter(c->enc, VENC_IndexParamBitrate, &br) != 0) {
+            set_error("VideoEncSetParameter(bitrate=%d) failed", bitrate);
+            goto fail;
+        }
+    }
 
     VencBaseConfig bcfg;
     memset(&bcfg, 0, sizeof bcfg);
@@ -560,259 +622,224 @@ int main(int argc, char **argv)
     bcfg.nDstWidth   = w; bcfg.nDstHeight   = h;
     bcfg.nStride     = stride_bytes ? pitch : w;
     bcfg.eInputFormat = (VENC_PIXEL_FMT)in_fmt;
-    bcfg.memops = memops; bcfg.veOpsS = veops; bcfg.pVeOpsSelf = NULL;
+    bcfg.memops = c->memops; bcfg.veOpsS = veops; bcfg.pVeOpsSelf = NULL;
 
-    if (p_VideoEncInit(enc, &bcfg) != 0) { LOG("VideoEncInit failed"); goto done; }
-    enc_inited = 1;
+    if (p_VideoEncInit(c->enc, &bcfg) != 0) { set_error("VideoEncInit failed"); goto fail; }
+    c->enc_inited = 1;
 
     VencAllocateBufferParam bp;
     memset(&bp, 0, sizeof bp);
-    int rgb_in = (in_fmt >= VENC_PIXEL_ARGB && in_fmt <= VENC_PIXEL_BGRA);
+    c->rgb_in = (in_fmt >= VENC_PIXEL_ARGB && in_fmt <= VENC_PIXEL_BGRA);
     bp.nBufferNum = 1;
-    bp.nSizeY     = rgb_in ? w * h * 4 : w * h;
-    bp.nSizeC     = rgb_in ? 0         : w * h / 2;
-    if (p_AllocInputBuffer(enc, &bp) != 0) { LOG("AllocInputBuffer failed"); goto done; }
-    buffers_alloced = 1;
+    bp.nSizeY     = c->rgb_in ? w * h * 4 : w * h;
+    bp.nSizeC     = c->rgb_in ? 0         : w * h / 2;
+    if (p_AllocInputBuffer(c->enc, &bp) != 0) { set_error("AllocInputBuffer failed"); goto fail; }
+    c->buffers_alloced = 1;
 
     LOG("encoder ready: %ux%u fmt=%d (%s) stride=%u -> H.264 @ %d fps",
-        w, h, in_fmt, rgb_in ? "RGB passthrough" : "NV12 via CPU convert",
+        w, h, in_fmt, c->rgb_in ? "RGB passthrough" : "NV12 via CPU convert",
         bcfg.nStride, fps);
 
     /* SPS/PPS is fetched after the first frame is encoded — see fetch_sps_pps()
-     * below. The parameter set does not exist until then: querying beforehand
+     * above. The parameter set does not exist until then: querying beforehand
      * returns a pointer with nLength=0. */
-    unsigned char sps_pps[512];
-    unsigned sps_pps_len = 0;
-    int sps_pps_written = 0;
 
-    out = fopen(out_path, "wb");
-    if (!out) { LOG("fopen(%s): %s", out_path, strerror(errno)); goto done; }
+    memset(&c->inbuf, 0, sizeof c->inbuf);
+    if (p_GetOneAllocInputBuffer(c->enc, &c->inbuf) != 0) {
+        set_error("GetOneAllocInputBuffer failed");
+        goto fail;
+    }
+    c->held = &c->inbuf;
 
-    /* Audio comes from an ALSA `type file` tee that the sound server writes
-     * continuously (see scripts/install-audio-tee.sh). Seek to the end at
-     * capture start so we copy only what plays during this recording, then
-     * follow the file as it grows. */
-    if (!audio_off) {
-        /* Two sources are supported. A Unix socket is rgsp-audio-pump, which
-         * ALSA spawns and which streams live audio with nothing on disk. A
-         * regular file is the older `type file` tee, followed from EOF. */
-        struct stat ast;
-        int is_sock = (stat(audio_tee, &ast) == 0) && S_ISSOCK(ast.st_mode);
+    c->frame_ns = 1000000000L / fps;
+    c->deadline = now_ns();
+    return c;
 
-        if (is_sock) {
-            audio_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-            if (audio_fd >= 0) {
-                struct sockaddr_un sa;
-                memset(&sa, 0, sizeof sa);
-                sa.sun_family = AF_UNIX;
-                snprintf(sa.sun_path, sizeof sa.sun_path, "%s", audio_tee);
-                if (connect(audio_fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-                    LOG("audio: connect(%s): %s (recording video only)",
-                        audio_tee, strerror(errno));
-                    close(audio_fd); audio_fd = -1;
-                } else {
-                    fcntl(audio_fd, F_SETFL, O_NONBLOCK);
-                }
-            }
-        } else {
-            audio_fd = open(audio_tee, O_RDONLY);
-            if (audio_fd >= 0) lseek(audio_fd, 0, SEEK_END);
-        }
+fail:
+    rgsp_capture_close(c);
+    return NULL;
+}
 
-        if (audio_fd < 0) {
-            LOG("audio: %s: %s (recording video only)", audio_tee, strerror(errno));
-        } else {
-            snprintf(audio_path, sizeof audio_path, "%s.pcm", out_path);
-            audio_out = fopen(audio_path, "wb");
-            if (!audio_out) {
-                LOG("audio: fopen(%s): %s", audio_path, strerror(errno));
-                close(audio_fd); audio_fd = -1;
-            } else {
-                LOG("audio: %s %s -> %s (s16le 48000 Hz stereo)",
-                    is_sock ? "streaming from" : "following",
-                    audio_tee, audio_path);
-            }
+rgsp_capture *rgsp_capture_open(int width, int height, int fps, int bitrate)
+{
+    /* Hand the framebuffer to the VE untouched. Allwinner names the formats by
+     * 32-bit word order, so VENC_PIXEL_ARGB (12) is the one whose byte layout
+     * is B,G,R,A — exactly /dev/fb0. Verified against the CPU conversion path
+     * at 42.2 dB PSNR on identical screen content. */
+    return rgsp_capture_open_ex(width, height, fps, bitrate, VENC_PIXEL_ARGB, 0);
+}
+
+int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
+                      size_t *len, int *is_keyframe)
+{
+    if (!c) { set_error("null capture"); return -1; }
+
+    /* Pace to the frame deadline before capturing, so each frame samples the
+     * screen one frame interval after the last. */
+    long long slack = c->deadline - now_ns();
+    if (slack > 0) {
+        struct timespec ts = { .tv_sec = slack / 1000000000LL,
+                               .tv_nsec = slack % 1000000000LL };
+        nanosleep(&ts, NULL);
+    }
+    c->deadline += c->frame_ns;
+
+    c->out_len = 0;
+
+    /* Capture the *visible* buffer: with double buffering, yoffset tells
+     * us which half of the virtual framebuffer is currently on screen. */
+    struct fb_var_screeninfo vinfo;
+    unsigned yoff = 0;
+    if (ioctl(c->fb_fd, FBIOGET_VSCREENINFO, &vinfo) == 0) yoff = vinfo.yoffset;
+    off_t fb_off = (off_t)yoff * c->pitch;
+
+    ssize_t n = pread(c->fb_fd, c->fb_buf, c->frame_bytes, fb_off);
+    if (n != (ssize_t)c->frame_bytes) {
+        c->short_reads++;
+        if (n <= 0) {
+            set_error("pread(/dev/fb0): %s", n < 0 ? strerror(errno) : "end of file");
+            return -1;
         }
     }
-    if (sps_pps_len) fwrite(sps_pps, 1, sps_pps_len, out);
+    const uint8_t *fb_src = c->fb_buf;
 
-    /* ── capture loop ────────────────────────────────────────────────── */
-    memset(&inbuf, 0, sizeof inbuf);
-    if (p_GetOneAllocInputBuffer(enc, &inbuf) != 0) { LOG("GetOneAllocInputBuffer failed"); goto done; }
-    held = &inbuf;
+    long long t0 = now_ns();
+    if (c->rgb_in) {
+        /* No conversion: the VE ingests the framebuffer format as-is.
+         * Still one copy, because the encoder reads from ION memory. */
+        memcpy(c->inbuf._virY, fb_src, c->frame_bytes);
+    } else if (c->bpp == 32) {
+        bgra_to_nv12(fb_src, c->pitch, c->w, c->h, c->inbuf._virY, c->inbuf._virUV);
+    } else {
+        rgb565_to_nv12(fb_src, c->pitch, c->w, c->h, c->inbuf._virY, c->inbuf._virUV);
+    }
+    long long t1 = now_ns();
+    c->convert_ns += t1 - t0;
 
-    const long frame_ns = 1000000000L / fps;
-    long long t_start = now_ns(), next = t_start;
-    long long bytes_out = 0, encode_ns = 0, convert_ns = 0;
-    int frames = 0, keyframes = 0, short_reads = 0;
+    c->inbuf.nPts          = (long long)c->frames * (1000000LL / c->fps);
+    c->inbuf.bIsFirstFrame = (c->frames == 0);
 
-    while (!g_stop && frames < max_frames) {
-        /* Capture the *visible* buffer: with double buffering, yoffset tells
-         * us which half of the virtual framebuffer is currently on screen. */
-        unsigned yoff = 0;
-        if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) == 0) yoff = vinfo.yoffset;
-        off_t fb_off = (off_t)yoff * pitch;
-
-        ssize_t n = pread(fb_fd, fb_buf, frame_bytes, fb_off);
-        if (n != (ssize_t)frame_bytes) { short_reads++; if (n <= 0) break; }
-        const uint8_t *fb_src = fb_buf;
-
-        long long t0 = now_ns();
-        if (rgb_in) {
-            /* No conversion: the VE ingests the framebuffer format as-is.
-             * Still one copy, because the encoder reads from ION memory. */
-            memcpy(inbuf._virY, fb_src, frame_bytes);
-        } else if (bpp == 32) {
-            bgra_to_nv12(fb_src, pitch, w, h, inbuf._virY, inbuf._virUV);
-        } else {
-            rgb565_to_nv12(fb_src, pitch, w, h, inbuf._virY, inbuf._virUV);
-        }
-        long long t1 = now_ns();
-        convert_ns += t1 - t0;
-
-        inbuf.nPts          = (long long)frames * (1000000LL / fps);
-        inbuf.bIsFirstFrame = (frames == 0);
-
-        p_FlushCacheAllocInputBuffer(enc, &inbuf);
-        if (p_AddOneInputBuffer(enc, &inbuf) != 0) { LOG("AddOneInputBuffer failed"); break; }
-        if (p_VideoEncodeOneFrame(enc) != 0)       { LOG("VideoEncodeOneFrame failed at frame %d", frames); break; }
-        encode_ns += now_ns() - t1;
-
-        /* Parameter sets exist only once a frame has been encoded, so grab
-         * them after the first one and emit them ahead of any frame data. */
-        if (!sps_pps_written) {
-            sps_pps_len = fetch_sps_pps(enc, memops, sps_pps, sizeof sps_pps);
-            if (sps_pps_len) {
-                fwrite(sps_pps, 1, sps_pps_len, out);
-                bytes_out += sps_pps_len;
-                LOG("SPS/PPS: %u bytes", sps_pps_len);
-                if (g_verbose)
-                    hexdump("sps/pps", sps_pps, (int)(sps_pps_len > 32 ? 32 : sps_pps_len));
-            } else {
-                LOG("warning: no SPS/PPS - the file will not decode standalone");
-            }
-            sps_pps_written = 1;
-            if (dump_hdr) { rc = 0; goto done; }
-        }
-
-        while (p_ValidBitstreamFrameNum(enc) > 0) {
-            VencOutputBuffer ob;
-            memset(&ob, 0, sizeof ob);
-            if (p_GetOneBitstreamFrame(enc, &ob) != 0) break;
-
-            /* The vendor exposes the frame as up to two segments of a ring
-             * buffer (pData0/nSize0 + pData1/nSize1), with nTotalSize the sum.
-             * Only trust the split when it adds up; otherwise treat pData0 as
-             * one contiguous run of nTotalSize bytes, which is what
-             * cedar-probe does and what this build appears to produce. */
-            if (ob.pData0 && ob.nSize0 &&
-                ob.nSize0 + ob.nSize1 == ob.nTotalSize) {
-                bytes_out += write_avcc_as_annexb(out, ob.pData0, ob.nSize0);
-                if (ob.pData1 && ob.nSize1)
-                    bytes_out += write_avcc_as_annexb(out, ob.pData1, ob.nSize1);
-            } else if (ob.pData0 && ob.nTotalSize) {
-                size_t n2 = write_avcc_as_annexb(out, ob.pData0, ob.nTotalSize);
-                if (n2 == 0) {   /* not AVCC after all — emit verbatim */
-                    fwrite(ob.pData0, 1, ob.nTotalSize, out);
-                    n2 = ob.nTotalSize;
-                }
-                bytes_out += n2;
-            }
-
-            if (ob.bIsKeyFrame) keyframes++;
-            VLOG("frame %d: total=%u size0=%u size1=%u%s", frames,
-                 ob.nTotalSize, ob.nSize0, ob.nSize1, ob.bIsKeyFrame ? " (key)" : "");
-            p_FreeOneBitStreamFrame(enc, &ob);
-        }
-
-        /* Recycle the input buffer for the next frame. */
-        memset(&used, 0, sizeof used);
-        if (p_AlreadyUsedInputBuffer(enc, &used) == 0)
-            p_ReturnOneAllocInputBuffer(enc, &used);
-        memset(&inbuf, 0, sizeof inbuf);
-        if (p_GetOneAllocInputBuffer(enc, &inbuf) != 0) { LOG("GetOneAllocInputBuffer failed at frame %d", frames); held = NULL; break; }
-
-        if (audio_fd >= 0) {
-            /* Copy however much the tee has written since last frame. A short
-             * read just means no new audio yet. */
-            unsigned char abuf[16384];
-            ssize_t an;
-            while ((an = read(audio_fd, abuf, sizeof abuf)) > 0) {
-                fwrite(abuf, 1, (size_t)an, audio_out);
-                audio_bytes += an;
-            }
-        }
-
-        frames++;
-
-        next += frame_ns;
-        long long slack = next - now_ns();
-        if (slack > 0) {
-            struct timespec ts = { .tv_sec = slack / 1000000000LL,
-                                   .tv_nsec = slack % 1000000000LL };
-            nanosleep(&ts, NULL);
-        }
+    /* Moonlight asks for an IDR after packet loss; the vendor parameter is
+     * one-shot and applies to the frame encoded next. */
+    if (c->force_idr) {
+        int one = 1, r = -1;
+        if (p_VideoEncSetParameter)
+            r = p_VideoEncSetParameter(c->enc, VENC_IndexParamForceKeyFrame, &one);
+        if (r != 0)
+            LOG("warning: force-IDR request ignored (rc=%d); the next frame may not be a keyframe", r);
+        c->force_idr = 0;
     }
 
-    /* Audio reaches the tee one ALSA buffer behind the wall clock (1024 frames
-     * at 48 kHz = 21.3 ms). Waiting exactly that long before the final drain
-     * lands the captured audio on the same end time as the last video frame;
-     * draining immediately loses the tail, waiting longer overshoots it. */
-    if (audio_fd >= 0) {
-        struct timespec settle = { .tv_sec = 0, .tv_nsec = 21333333L };
-        nanosleep(&settle, NULL);
-        unsigned char abuf[16384];
-        ssize_t an;
-        while ((an = read(audio_fd, abuf, sizeof abuf)) > 0 && audio_out) {
-            fwrite(abuf, 1, (size_t)an, audio_out);
-            audio_bytes += an;
+    p_FlushCacheAllocInputBuffer(c->enc, &c->inbuf);
+    if (p_AddOneInputBuffer(c->enc, &c->inbuf) != 0) {
+        set_error("AddOneInputBuffer failed at frame %d", c->frames);
+        return -1;
+    }
+    if (p_VideoEncodeOneFrame(c->enc) != 0) {
+        set_error("VideoEncodeOneFrame failed at frame %d", c->frames);
+        return -1;
+    }
+    c->encode_ns += now_ns() - t1;
+
+    /* Parameter sets exist only once a frame has been encoded, so grab
+     * them after the first one and emit them ahead of any frame data. */
+    if (!c->sps_pps_fetched) {
+        c->sps_pps_len = fetch_sps_pps(c->enc, c->memops, c->sps_pps, sizeof c->sps_pps);
+        if (c->sps_pps_len)
+            LOG("SPS/PPS: %u bytes", c->sps_pps_len);
+        else
+            LOG("warning: no SPS/PPS - the stream will not decode standalone");
+        c->sps_pps_fetched = 1;
+    }
+    if (c->frames == 0 && c->sps_pps_len &&
+        out_append(c, c->sps_pps, c->sps_pps_len) != 0)
+        return -1;
+
+    while (p_ValidBitstreamFrameNum(c->enc) > 0) {
+        VencOutputBuffer ob;
+        memset(&ob, 0, sizeof ob);
+        if (p_GetOneBitstreamFrame(c->enc, &ob) != 0) break;
+
+        /* The vendor exposes the frame as up to two segments of a ring
+         * buffer (pData0/nSize0 + pData1/nSize1), with nTotalSize the sum.
+         * Only trust the split when it adds up; otherwise treat pData0 as
+         * one contiguous run of nTotalSize bytes, which is what
+         * cedar-probe does and what this build appears to produce. */
+        if (ob.pData0 && ob.nSize0 &&
+            ob.nSize0 + ob.nSize1 == ob.nTotalSize) {
+            append_avcc_as_annexb(c, ob.pData0, ob.nSize0);
+            if (ob.pData1 && ob.nSize1)
+                append_avcc_as_annexb(c, ob.pData1, ob.nSize1);
+        } else if (ob.pData0 && ob.nTotalSize) {
+            if (append_avcc_as_annexb(c, ob.pData0, ob.nTotalSize) == 0)
+                out_append(c, ob.pData0, ob.nTotalSize);  /* not AVCC — verbatim */
         }
+
+        VLOG("frame %d: total=%u size0=%u size1=%u%s", c->frames,
+             ob.nTotalSize, ob.nSize0, ob.nSize1, ob.bIsKeyFrame ? " (key)" : "");
+        p_FreeOneBitStreamFrame(c->enc, &ob);
     }
 
-    {
-        double secs = (now_ns() - t_start) / 1e9;
-        LOG("captured %d frames (%d keyframes) in %.1f s = %.1f fps",
-            frames, keyframes, secs, secs > 0 ? frames / secs : 0.0);
-        LOG("output %lld bytes = %.0f kbps average",
-            bytes_out, secs > 0 ? (bytes_out * 8.0 / 1000.0) / secs : 0.0);
-        if (frames) {
-            LOG("per frame: %s %.2f ms, encode %.2f ms",
-            rgb_in ? "copy   " : "convert",
-                convert_ns / 1e6 / frames, encode_ns / 1e6 / frames);
-        }
-        if (short_reads) LOG("warning: %d short framebuffer reads", short_reads);
-        if (audio_bytes) {
-            double asecs = audio_bytes / (48000.0 * 2 * 2);
-            LOG("audio %lld bytes = %.1f s (%.2f s vs video; drift %+.0f ms)",
-                audio_bytes, asecs, secs, (asecs - secs) * 1000.0);
-        } else if (!audio_off) {
-            LOG("audio: nothing captured - is the ALSA tee installed and a game running?");
-        }
+    /* Recycle the input buffer for the next frame. */
+    memset(&c->used, 0, sizeof c->used);
+    if (p_AlreadyUsedInputBuffer(c->enc, &c->used) == 0)
+        p_ReturnOneAllocInputBuffer(c->enc, &c->used);
+    memset(&c->inbuf, 0, sizeof c->inbuf);
+    if (p_GetOneAllocInputBuffer(c->enc, &c->inbuf) != 0) {
+        set_error("GetOneAllocInputBuffer failed at frame %d", c->frames);
+        c->held = NULL;
+        return -1;
     }
-    rc = 0;
 
-done:
+    c->frames++;
+
+    if (data)        *data = c->out_buf;
+    if (len)         *len  = c->out_len;
+    if (is_keyframe) *is_keyframe = annexb_first_slice_is_idr(c->out_buf, c->out_len);
+    return 0;
+}
+
+void rgsp_capture_request_idr(rgsp_capture *c)
+{
+    if (c) c->force_idr = 1;
+}
+
+const unsigned char *rgsp_capture_param_sets(rgsp_capture *c, size_t *len)
+{
+    if (!c || !c->sps_pps_len) { if (len) *len = 0; return NULL; }
+    if (len) *len = c->sps_pps_len;
+    return c->sps_pps;
+}
+
+void rgsp_capture_stats(rgsp_capture *c, long long *convert_ns,
+                        long long *encode_ns, int *short_reads)
+{
+    if (!c) return;
+    if (convert_ns)  *convert_ns  = c->convert_ns;
+    if (encode_ns)   *encode_ns   = c->encode_ns;
+    if (short_reads) *short_reads = c->short_reads;
+}
+
+void rgsp_capture_close(rgsp_capture *c)
+{
+    if (!c) return;
+
     /* Documented teardown order. Reached on every exit path, so the VE and
      * its ION allocations are always released. */
-    if (audio_fd >= 0) close(audio_fd);
-    if (audio_out) fclose(audio_out);
-    if (out) fclose(out);
-    if (enc) {
-        if (held) {
-            memset(&used, 0, sizeof used);
-            if (p_AlreadyUsedInputBuffer && p_AlreadyUsedInputBuffer(enc, &used) == 0 &&
+    if (c->enc) {
+        if (c->held) {
+            memset(&c->used, 0, sizeof c->used);
+            if (p_AlreadyUsedInputBuffer && p_AlreadyUsedInputBuffer(c->enc, &c->used) == 0 &&
                 p_ReturnOneAllocInputBuffer)
-                p_ReturnOneAllocInputBuffer(enc, &used);
+                p_ReturnOneAllocInputBuffer(c->enc, &c->used);
         }
-        if (buffers_alloced && p_ReleaseAllocInputBuffer) p_ReleaseAllocInputBuffer(enc);
-        if (enc_inited && p_VideoEncUnInit)               p_VideoEncUnInit(enc);
-        if (p_VideoEncDestroy)                            p_VideoEncDestroy(enc);
+        if (c->buffers_alloced && p_ReleaseAllocInputBuffer) p_ReleaseAllocInputBuffer(c->enc);
+        if (c->enc_inited && p_VideoEncUnInit)               p_VideoEncUnInit(c->enc);
+        if (p_VideoEncDestroy)                               p_VideoEncDestroy(c->enc);
     }
-    if (mem_open && memops && memops->close) memops->close();
-    free(fb_buf);
-    if (fb_fd >= 0) close(fb_fd);
-    if (g_libvenc) dlclose(g_libvenc);
-    if (g_libMem)  dlclose(g_libMem);
-    if (g_libVE)   dlclose(g_libVE);
-    return rc;
+    if (c->mem_open && c->memops && c->memops->close) c->memops->close();
+    free(c->fb_buf);
+    free(c->out_buf);
+    if (c->fb_fd >= 0) close(c->fb_fd);
+    free(c);
 }

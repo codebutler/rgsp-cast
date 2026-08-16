@@ -17,11 +17,23 @@ BINS = bin/rgsp-cast bin/rgsp-audio-pump bin/fmt-probe
 
 all: $(BINS)
 
-bin/rgsp-cast: src/rgsp-cast.c
+librgspcast.a: src/rgsp-cast.c src/rgsp_cast_internal.h include/rgsp_cast.h
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
+		sh -c 'apt-get update -qq && apt-get install -y -qq gcc binutils >/dev/null 2>&1 && \
+		       gcc $(CFLAGS) -c -o /tmp/rgsp-cast.o src/rgsp-cast.c && \
+		       ar rcs $@ /tmp/rgsp-cast.o'
+
+bin/rgsp-cast: src/rgsp-cast-cli.c librgspcast.a
 	@mkdir -p bin
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
 		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $<  -ldl'
+		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
+
+bin/test-capture-api: tests/test_capture_api.c librgspcast.a
+	@mkdir -p bin
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
+		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
+		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
 
 bin/rgsp-audio-pump: src/rgsp-audio-pump.c
 	@mkdir -p bin
@@ -69,4 +81,4 @@ monitor: deploy
 	scp -q $(DEVICE):$(DESTDIR)/mon.log .
 
 clean:
-	rm -rf bin
+	rm -rf bin librgspcast.a
