@@ -1,0 +1,20 @@
+[package]
+name = "rgsp-host"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rgsp_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rgsp-host"
+path = "src/main.rs"
+
+[dependencies]
+moonshine-core = { path = "../vendor/moonshine/moonshine-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+libc = "0.2"
+anyhow = "1"
