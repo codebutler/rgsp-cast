@@ -1,0 +1,7 @@
+{
+  "name": "Cast",
+  "version": "v0.1.0",
+  "type": "TOOL",
+  "description": "Stream this device's screen and sound to a Moonlight client.",
+  "platforms": ["h700"]
+}
