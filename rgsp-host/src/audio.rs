@@ -1,6 +1,7 @@
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result};
+use tracing::warn;
 
 /// Fixed by what minarch plays. snd-aloop fails the capture side with -EIO
 /// if the two ends of the cable disagree on format, rate or channels
@@ -12,7 +13,15 @@ pub const PERIOD_FRAMES: usize = 240;
 
 pub struct LoopbackCapture {
     pcm: PCM,
+    overrun_count: u32,
 }
+
+/// `LoopbackCapture` can be sent to other threads because the ALSA PCM handle
+/// (`pcm::PCM`) is thread-safe for the single capture stream we create. The
+/// kernel loopback device is a real hardware endpoint with exclusive access
+/// serialization. Unlike C state that racily accesses process-global buffers,
+/// ALSA's Rust binding handles synchronization internally.
+unsafe impl Send for LoopbackCapture {}
 
 impl LoopbackCapture {
     pub fn open(device: &str) -> Result<LoopbackCapture> {
@@ -21,13 +30,62 @@ impl LoopbackCapture {
 
         {
             let hwp = HwParams::any(&pcm)?;
-            hwp.set_access(Access::RWInterleaved)?;
-            hwp.set_format(Format::s16())?;
-            hwp.set_channels(CHANNELS)?;
-            hwp.set_rate(SAMPLE_RATE, ValueOr::Nearest)?;
-            hwp.set_period_size_near(PERIOD_FRAMES as i64, ValueOr::Nearest)?;
-            hwp.set_buffer_size_near((PERIOD_FRAMES * 4) as i64)?;
+            hwp.set_access(Access::RWInterleaved)
+                .context("setting access to RWInterleaved")?;
+            hwp.set_format(Format::s16())
+                .context("setting format to S16_LE")?;
+            hwp.set_channels(CHANNELS)
+                .context(format!("setting channels to {}", CHANNELS))?;
+            hwp.set_rate(SAMPLE_RATE, ValueOr::Nearest)
+                .context(format!("setting rate to {} Hz", SAMPLE_RATE))?;
+            hwp.set_period_size_near(PERIOD_FRAMES as i64, ValueOr::Nearest)
+                .context("setting period size")?;
+            hwp.set_buffer_size_near((PERIOD_FRAMES * 4) as i64)
+                .context("setting buffer size")?;
             pcm.hw_params(&hwp)?;
+        }
+
+        // Verify that ALSA granted what we asked for. snd-aloop fails the capture
+        // side with -EIO when the two ends of the cable disagree on format, rate or
+        // channels (aloop.c loopback_check_format), so mismatches are fatal.
+        {
+            let hwp = pcm.hw_params_current().context("reading current hardware parameters")?;
+
+            let actual_rate = hwp.get_rate().context("reading rate from hardware")?;
+            if actual_rate != SAMPLE_RATE {
+                return Err(anyhow::anyhow!(
+                    "rate negotiation failed: requested {}, got {}",
+                    SAMPLE_RATE,
+                    actual_rate
+                ));
+            }
+
+            let actual_channels = hwp.get_channels().context("reading channels from hardware")?;
+            if actual_channels != CHANNELS {
+                return Err(anyhow::anyhow!(
+                    "channel count negotiation failed: requested {}, got {}",
+                    CHANNELS,
+                    actual_channels
+                ));
+            }
+
+            let actual_format = hwp.get_format().context("reading format from hardware")?;
+            if actual_format != Format::s16() {
+                return Err(anyhow::anyhow!(
+                    "format negotiation failed: requested S16_LE, got {:?}",
+                    actual_format
+                ));
+            }
+
+            let period_frames = hwp.get_period_size().context("reading period size from hardware")?;
+            let buffer_frames = hwp.get_buffer_size().context("reading buffer size from hardware")?;
+            tracing::debug!(
+                "loopback capture negotiated: rate={} Hz channels={} period={} frames buffer={} frames",
+                actual_rate,
+                actual_channels,
+                period_frames,
+                buffer_frames
+            );
         }
 
         // snd-aloop rejects the implicit start that snd_pcm_readi() would do,
@@ -35,12 +93,21 @@ impl LoopbackCapture {
         pcm.prepare().context("prepare")?;
         pcm.start().context("start")?;
 
-        Ok(LoopbackCapture { pcm })
+        Ok(LoopbackCapture {
+            pcm,
+            overrun_count: 0,
+        })
     }
 
     /// Reads interleaved s16 frames. `buf.len()` must be a multiple of CHANNELS.
     /// Returns the number of *frames* read.
     pub fn read(&mut self, buf: &mut [i16]) -> Result<usize> {
+        debug_assert_eq!(
+            buf.len() % CHANNELS as usize,
+            0,
+            "buffer length must be a multiple of CHANNELS"
+        );
+
         let io = self.pcm.io_i16()?;
         loop {
             match io.readi(buf) {
@@ -49,6 +116,11 @@ impl LoopbackCapture {
                     // An overrun means we fell behind; recover and keep going
                     // rather than tearing down the stream.
                     if e.errno() == libc::EPIPE {
+                        self.overrun_count += 1;
+                        warn!(
+                            "audio buffer overrun #{}: recovering",
+                            self.overrun_count
+                        );
                         self.pcm.prepare()?;
                         self.pcm.start()?;
                         continue;
@@ -57,5 +129,10 @@ impl LoopbackCapture {
                 }
             }
         }
+    }
+
+    /// Returns the number of buffer overruns encountered during capture.
+    pub fn overrun_count(&self) -> u32 {
+        self.overrun_count
     }
 }
