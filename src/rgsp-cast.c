@@ -842,7 +842,14 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
         memset(&g, 0, sizeof g);
         if (p_GetOneBitstreamFrame(c->enc, o) != 0) {
             /* Nothing retrieved at all means there is no frame to hand back;
-             * that is a failure, not an early end to the segment list. */
+             * that is a failure, not an early end to the segment list.
+             *
+             * Caveat for the next reader: a preceding segment that succeeded
+             * but carried nTotalSize == 0 would leave out_len untouched and be
+             * indistinguishable from "the loop has not appended yet", so a
+             * genuine failure after one could be misreported as end-of-list.
+             * Not seen in practice on this encoder, and not worth a speculative
+             * fix — but that is the hole if this ever misbehaves. */
             if (c->out_len == before_drain) {
                 set_error("GetOneBitstreamFrame failed at frame %d", c->frames);
                 return capture_fail(c);
