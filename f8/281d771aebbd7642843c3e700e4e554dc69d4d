@@ -1,0 +1,30 @@
+rgsp-host/src/routing.rs
+  s_5335a78adb4cf1::t_735fbd2d93b6b6 62-65
+  s_5335a78adb4cf1::t_82a649be5c5bd9 179-185,195-216
+  s_5335a78adb4cf1::t_306c8f3ac87b8f 226-230
+  s_f1a5bd6f484102::t_7e297bdecb5323 217-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "f8281d771aebbd7642843c3e700e4e554dc69d4d",
+  "prompts": {},
+  "sessions": {
+    "s_5335a78adb4cf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "26db82e2-b784-45af-a7b4-f0771a3db06b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_f1a5bd6f484102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00298-425a-7023-afc5-ec78144ac34f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
