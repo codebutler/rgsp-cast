@@ -1,6 +1,13 @@
 // Runs only on the device (needs /dev/fb0 and the Cedar libs).
 // Skips cleanly elsewhere so the suite stays green on a laptop.
 use rgsp_host::capture::Capture;
+use std::sync::Mutex;
+
+/// Capture is single-instance per process by design (see CAPTURE_OPEN), so
+/// tests that open one must not run concurrently. cargo's harness is threaded
+/// by default, and on the device — where neither test short-circuits — an
+/// unserialised pair races for the guard and one fails.
+static CAPTURE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn captures_annexb_frames_starting_with_a_keyframe() {
@@ -8,6 +15,11 @@ fn captures_annexb_frames_starting_with_a_keyframe() {
         eprintln!("skipping: no /dev/fb0");
         return;
     }
+
+    // Serialize with other Capture-opening tests.
+    let _guard = CAPTURE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     let mut cap = Capture::open(720, 480, 30, 2_000_000).expect("open");
 
@@ -32,6 +44,11 @@ fn single_instance_guard_enforces_one_capture_per_process() {
         eprintln!("skipping: no /dev/fb0");
         return;
     }
+
+    // Serialize with other Capture-opening tests.
+    let _guard = CAPTURE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     // Open the first capture.
     let cap1 = Capture::open(720, 480, 30, 2_000_000).expect("first open");
