@@ -18,8 +18,17 @@ mkdir -p "$RUN_DIR"
 # The vendor CedarC libraries live in the pak, fetched at install time.
 export LD_LIBRARY_PATH="$PAK_DIR/lib/${PLATFORM:-h700}:$LD_LIBRARY_PATH"
 
-show() {
-    show2.elf --mode=simple --image="$PAK_DIR/cast.png" --bgcolor=0x000000 &
+show_status() {
+    # Show status with optional text message (progress mode if text provided, simple otherwise).
+    # Usage: show_status [text_message]
+    if [ $# -gt 0 ]; then
+        # Progress mode with text (allows user to distinguish states)
+        show2.elf --mode=progress --image="$PAK_DIR/cast.png" --bgcolor=0x000000 \
+                  --fontcolor=0xFFFFFF --text="$1" &
+    else
+        # Simple mode without text
+        show2.elf --mode=simple --image="$PAK_DIR/cast.png" --bgcolor=0x000000 &
+    fi
     SHOW_PID=$!
     sleep 2
     kill "$SHOW_PID" 2>/dev/null || true
@@ -41,19 +50,17 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     # the daemon is still shutting down normally. Deleting the file would cause
     # the next launch to start a second instance, which loses the flock.
     if [ ! -f "$PID_FILE" ]; then
-        # Daemon exited cleanly. Show normal status.
-        show
+        # Daemon exited cleanly.
+        show_status "Casting stopped"
     else
-        # Daemon still running (normal if shutting down). Report to user.
-        show2.elf --mode=simple --image="$PAK_DIR/cast.png" --bgcolor=0x000000 &
-        SHOW_PID=$!
-        sleep 2
-        kill "$SHOW_PID" 2>/dev/null || true
+        # Daemon still running after timeout (normal during shutdown). Inform user.
+        show_status "Still stopping — try again in a moment"
     fi
 else
-    # Not casting: start, detached, so it survives this script exiting.
-    "$PAK_DIR/rgsp-host" >"$LOG" 2>&1 &
+    # Not casting: start, detached in subshell so it survives this script exiting.
+    # Subshell form matches Cast-Pak precedent and ensures daemon survives pak termination.
+    ( "$PAK_DIR/rgsp-host" >"$LOG" 2>&1 & )
     i=0
     while [ ! -f "$PID_FILE" ] && [ $i -lt 50 ]; do i=$((i+1)); sleep 0.1; done
-    show
+    show_status "Casting started"
 fi
