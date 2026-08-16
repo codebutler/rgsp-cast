@@ -95,6 +95,13 @@ fn send_frame(
 /// Whether a PCM chunk is exactly one Opus frame's worth of samples for the
 /// given channel count. A short or long chunk would desync Opus's fixed
 /// 5 ms framing, so anything else must be rejected rather than encoded.
+///
+/// KNOWN LIMITATION: `expected_samples` scales with the *negotiated* channel
+/// count, but the host's capture is fixed at stereo. A client that negotiates
+/// 5.1 therefore has every chunk rejected here — silent audio, with nothing
+/// louder than the warning below to say so. Moonlight defaults to stereo, so
+/// this has not bitten; fixing it means upmixing host-side or pinning the
+/// negotiation to stereo.
 fn chunk_len_is_valid(pcm: &[i16], expected_samples: usize) -> bool {
 	pcm.len() == expected_samples
 }
