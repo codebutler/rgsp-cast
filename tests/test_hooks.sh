@@ -182,40 +182,92 @@ else
     echo "ok: 10-rgsp-aloop.sh leaves foreign .asoundrc alone"
 fi
 
-# Test 8: boot hook skips insmod when module is already loaded
-echo "=== Testing boot hook skips insmod when module is loaded ==="
-TESTDIR7="$TMPDIR/rgsp-test-boot-insmod-$$"
-mkdir -p "$TESTDIR7"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6' '$TESTDIR7'" EXIT
-export RGSP_RUN_DIR="$TESTDIR7"
-export USERDATA_PATH="$TESTDIR7"
-export RGSP_PAK_DIR="$TESTDIR7/pak"
-mkdir -p "$TESTDIR7/pak"
+# Test 8a: boot hook calls insmod when module is absent from lsmod
+echo "=== Testing boot hook calls insmod when module is absent ==="
+TESTDIR8="$TMPDIR/rgsp-test-boot-insmod-load-$$"
+mkdir -p "$TESTDIR8"
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6' '$TESTDIR8'" EXIT
+export RGSP_RUN_DIR="$TESTDIR8"
+export USERDATA_PATH="$TESTDIR8"
+export RGSP_PAK_DIR="$TESTDIR8/pak"
+export RGSP_LOG_PATH="$TESTDIR8/logs/rgsp-hooks.log"
+mkdir -p "$TESTDIR8/pak" "$TESTDIR8/logs"
 
 # Create dummy module file
-touch "$TESTDIR7/pak/snd-aloop.ko"
+touch "$TESTDIR8/pak/snd-aloop.ko"
 
-# Create a test environment where module is "already loaded"
-# The hook checks: lsmod 2>/dev/null | grep -q '^snd_aloop' && exit 0
-# We test this by providing a fake lsmod that reports the module is loaded
-mkdir -p "$TESTDIR7/bin"
-cat > "$TESTDIR7/bin/lsmod" <<'EOF'
+# Create recording stubs for insmod and lsmod
+mkdir -p "$TESTDIR8/bin"
+cat > "$TESTDIR8/bin/insmod" <<'EOF'
 #!/bin/sh
-echo "snd_aloop 12345 1 - Live 0x00000000"
+echo "$@" >> "$RGSP_RUN_DIR/insmod.calls"
 exit 0
 EOF
-chmod +x "$TESTDIR7/bin/lsmod"
+chmod +x "$TESTDIR8/bin/insmod"
 
-# Run boot hook - it should exit early at the lsmod check
-export PATH="$TESTDIR7/bin:$PATH"
-if sh "$HERE"/../pak/hooks/boot.d/10-rgsp-aloop.sh >/dev/null 2>&1; then
-    echo "ok: 10-rgsp-aloop.sh skips insmod when module already loaded"
+cat > "$TESTDIR8/bin/lsmod" <<'EOF'
+#!/bin/sh
+# Report that module is NOT loaded
+exit 0
+EOF
+chmod +x "$TESTDIR8/bin/lsmod"
+
+# Run boot hook - module is absent, so insmod should be called
+export PATH="$TESTDIR8/bin:$PATH"
+sh "$HERE"/../pak/hooks/boot.d/10-rgsp-aloop.sh >/dev/null 2>&1 || true
+
+# Verify insmod was called with the correct path
+if [ -f "$TESTDIR8/insmod.calls" ] && grep -q "snd-aloop.ko" "$TESTDIR8/insmod.calls"; then
+    echo "ok: 10-rgsp-aloop.sh calls insmod with module path when absent"
 else
-    echo "FAIL: 10-rgsp-aloop.sh did not exit cleanly when module loaded"
+    echo "FAIL: 10-rgsp-aloop.sh did not call insmod with module path"
     FAIL=1
 fi
 
-# Test 9: Check committed file modes are 100755
+# Test 8b: boot hook skips insmod when module is already loaded
+echo "=== Testing boot hook skips insmod when module is loaded ==="
+TESTDIR9="$TMPDIR/rgsp-test-boot-insmod-skip-$$"
+mkdir -p "$TESTDIR9"
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6' '$TESTDIR8' '$TESTDIR9'" EXIT
+export RGSP_RUN_DIR="$TESTDIR9"
+export USERDATA_PATH="$TESTDIR9"
+export RGSP_PAK_DIR="$TESTDIR9/pak"
+export RGSP_LOG_PATH="$TESTDIR9/logs/rgsp-hooks.log"
+mkdir -p "$TESTDIR9/pak" "$TESTDIR9/logs"
+
+# Create dummy module file
+touch "$TESTDIR9/pak/snd-aloop.ko"
+
+# Create recording stubs
+mkdir -p "$TESTDIR9/bin"
+cat > "$TESTDIR9/bin/insmod" <<'EOF'
+#!/bin/sh
+echo "$@" >> "$RGSP_RUN_DIR/insmod.calls"
+exit 0
+EOF
+chmod +x "$TESTDIR9/bin/insmod"
+
+cat > "$TESTDIR9/bin/lsmod" <<'EOF'
+#!/bin/sh
+# Report that module IS loaded
+echo "snd_aloop 12345 1 - Live 0x00000000"
+exit 0
+EOF
+chmod +x "$TESTDIR9/bin/lsmod"
+
+# Run boot hook - module is loaded, so insmod should NOT be called
+export PATH="$TESTDIR9/bin:$PATH"
+sh "$HERE"/../pak/hooks/boot.d/10-rgsp-aloop.sh >/dev/null 2>&1 || true
+
+# Verify insmod was NOT called
+if [ ! -f "$TESTDIR9/insmod.calls" ] || [ ! -s "$TESTDIR9/insmod.calls" ]; then
+    echo "ok: 10-rgsp-aloop.sh skips insmod when module already loaded"
+else
+    echo "FAIL: 10-rgsp-aloop.sh called insmod even though module was already loaded"
+    FAIL=1
+fi
+
+# Test 10: Check committed file modes are 100755
 echo "=== Checking committed file modes ==="
 if git rev-parse --git-dir >/dev/null 2>&1; then
     for hook in pak/hooks/*/*.sh tests/test_hooks.sh; do

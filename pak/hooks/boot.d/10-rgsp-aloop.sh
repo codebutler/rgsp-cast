@@ -4,7 +4,7 @@
 # kernel's vermagic and symbol CRCs and loads without --force.
 # Also performs crash recovery if .asoundrc was left pointing to loopback.
 PAK_DIR="${RGSP_PAK_DIR:-/mnt/SDCARD/Tools/h700/Cast.pak}"
-LOG="/mnt/SDCARD/.userdata/h700/logs/rgsp-hooks.log"
+LOG="${RGSP_LOG_PATH:-/mnt/SDCARD/.userdata/h700/logs/rgsp-hooks.log}"
 RUN_DIR="${RGSP_RUN_DIR:-/tmp/rgsp}"
 ASOUNDRC="${USERDATA_PATH:-/mnt/SDCARD/.userdata/h700}/.asoundrc"
 
