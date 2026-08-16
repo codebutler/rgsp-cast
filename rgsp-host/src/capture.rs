@@ -84,6 +84,9 @@ impl Capture {
     /// every later call returns an Err with the original error. Do not retry —
     /// the capture can only be safely dropped after a failure. A failed frame can
     /// leave the encoder's input buffer in an inconsistent state.
+    // Not `Iterator::next`: the returned `Frame` borrows `self` for as long as
+    // it lives, which `Iterator` cannot express.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Frame<'_>> {
         let mut data: *const u8 = std::ptr::null();
         let mut len: usize = 0;

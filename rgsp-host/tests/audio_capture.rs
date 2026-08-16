@@ -103,7 +103,9 @@ fn captures_non_silence_when_playback_is_active() {
     use alsa::pcm::{Access, Format, HwParams, PCM};
     use alsa::{Direction, ValueOr};
 
-    let mut cap = LoopbackCapture::open("hw:Loopback,1,0")
+    // Held open, not read from, until the ignored body is written; named `_cap`
+    // so the binding still keeps the capture end of the cable open.
+    let _cap = LoopbackCapture::open("hw:Loopback,1,0")
         .expect("open capture device");
 
     let pb_pcm = PCM::new("hw:Loopback,0,0", Direction::Playback, false)

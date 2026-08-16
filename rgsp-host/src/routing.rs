@@ -133,8 +133,6 @@ fn set_audio_sink(value: i32) {
 /// Load libmsettings and call InitSettings().
 /// Returns the handle if successful, None otherwise.
 fn load_and_init_libmsettings() -> Option<*mut libc::c_void> {
-    use std::ffi::CStr;
-
     // Try to load libmsettings in order of preference:
     // 1. Bare soname: when running from pak, LD_LIBRARY_PATH contains the platform lib dir
     // 2. From environment variables: SDCARD_PATH and PLATFORM (exported by NextUI)
@@ -142,10 +140,10 @@ fn load_and_init_libmsettings() -> Option<*mut libc::c_void> {
 
     // Attempt 1: bare soname (relies on LD_LIBRARY_PATH from pak launch)
     // Preload libtinyalsa.so.1 first so its symbols are available
-    let tinyalsa_bare = CStr::from_bytes_with_nul(b"libtinyalsa.so.1\0").unwrap();
+    let tinyalsa_bare = c"libtinyalsa.so.1";
     let _ = unsafe { libc::dlopen(tinyalsa_bare.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
 
-    let lib_name = CStr::from_bytes_with_nul(b"libmsettings.so\0").unwrap();
+    let lib_name = c"libmsettings.so";
     let lib = unsafe { libc::dlopen(lib_name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
     if !lib.is_null() {
         if try_init_library(lib, "LD_LIBRARY_PATH") {
@@ -210,10 +208,8 @@ fn try_load_and_init_from_dir(lib_dir: &str) -> Option<*mut libc::c_void> {
 /// Try to resolve InitSettings and SetAudioSink, then call InitSettings.
 /// Returns true if both symbols resolved and InitSettings succeeded.
 fn try_init_library(lib: *mut libc::c_void, path_desc: &str) -> bool {
-    use std::ffi::CStr;
-
     // Resolve InitSettings
-    let init_name = CStr::from_bytes_with_nul(b"InitSettings\0").unwrap();
+    let init_name = c"InitSettings";
     let init_sym = unsafe { libc::dlsym(lib, init_name.as_ptr()) };
     if init_sym.is_null() {
         let err = get_dlerror();
@@ -222,7 +218,7 @@ fn try_init_library(lib: *mut libc::c_void, path_desc: &str) -> bool {
     }
 
     // Resolve SetAudioSink
-    let sink_name = CStr::from_bytes_with_nul(b"SetAudioSink\0").unwrap();
+    let sink_name = c"SetAudioSink";
     let sink_sym = unsafe { libc::dlsym(lib, sink_name.as_ptr()) };
     if sink_sym.is_null() {
         let err = get_dlerror();
@@ -269,9 +265,7 @@ fn ensure_userdata_path() {
 }
 
 fn call_set_audio_sink(lib: *mut libc::c_void, value: i32) {
-    use std::ffi::CStr;
-
-    let sym_name = CStr::from_bytes_with_nul(b"SetAudioSink\0").unwrap();
+    let sym_name = c"SetAudioSink";
     let sym = unsafe { libc::dlsym(lib, sym_name.as_ptr()) };
 
     if !sym.is_null() {
