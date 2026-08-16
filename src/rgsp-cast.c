@@ -368,6 +368,12 @@ struct rgsp_capture {
     int       short_reads;
     long long convert_ns, encode_ns;
 
+    /* Sticky death flag. A failed next() can leave the vendor input buffer
+     * un-acquired or already submitted, so the object is not safe to drive
+     * again; fail_msg preserves the original diagnosis across later calls. */
+    int  failed;
+    char fail_msg[256];
+
     /* Vendor-written structs go LAST, and nothing may be added after them.
      *
      * The vendor libraries write past the end of VencInputBuffer, beyond even
@@ -387,9 +393,24 @@ struct rgsp_capture {
     unsigned char   _vendor_guard[4096];
 };
 
-/* Append AVCC (4-byte length prefixes) to the output buffer as Annex-B start
- * codes. Returns bytes written, or 0 if the buffer does not parse as AVCC — in
- * which case the caller should append it untouched. */
+/* GetOneBitstreamFrame() fills a VencOutputBuffer, so it is vendor-written on
+ * every frame and in principle carries the same overspill risk that `used`
+ * turned out to have — and it moved from the old main()'s large stack frame,
+ * which had scratch after it, into next()'s smaller one where the neighbours
+ * are live locals and the return address.
+ *
+ * Measured with a 0xAA sentinel on-device, the spill is **+0 bytes**: unlike
+ * VencInputBuffer, this struct is written strictly within its declared extent
+ * (its own _tail[256] included). The guard is therefore precaution, not a fix
+ * for a live bug — it is kept because it costs 256 bytes of stack and makes the
+ * struct safe wherever it is declared, in line with this file's standing rule
+ * that every vendor struct carries trailing slack. VencBaseConfig and
+ * VencAllocateBufferParam measured +0 as well and are left as plain locals. */
+typedef struct {
+    VencOutputBuffer ob;
+    unsigned char    guard[256];
+} GuardedOutputBuffer;
+
 static int out_reserve(rgsp_capture *c, size_t extra)
 {
     if (c->out_len + extra <= c->out_cap) return 0;
@@ -410,26 +431,41 @@ static int out_append(rgsp_capture *c, const unsigned char *d, size_t n)
     return 0;
 }
 
-static size_t append_avcc_as_annexb(rgsp_capture *c, const unsigned char *d, size_t n)
+/* Append AVCC (4-byte length prefixes) to the output buffer as Annex-B start
+ * codes.
+ *
+ * Returns 0 on success and -1 if the output buffer could not be grown; *written
+ * receives the number of bytes appended, which is 0 when the input does not
+ * parse as AVCC and the caller should append it untouched.
+ *
+ * Running out of memory has to be distinguishable from "not AVCC": both used to
+ * come back as a short byte count, so an allocation failure part-way through a
+ * frame silently produced a truncated Annex-B frame that was then handed to the
+ * caller with a success return. */
+static int append_avcc_as_annexb(rgsp_capture *c, const unsigned char *d,
+                                 size_t n, size_t *written)
 {
     static const unsigned char start[4] = { 0, 0, 0, 1 };
-    size_t off = 0, written = 0;
+    size_t off = 0;
+
+    *written = 0;
 
     /* Already Annex-B? Pass through. */
     if (n >= 4 && d[0] == 0 && d[1] == 0 && d[2] == 0 && d[3] == 1) {
-        if (out_append(c, d, n) != 0) return written;
-        return n;
+        if (out_append(c, d, n) != 0) return -1;
+        *written = n;
+        return 0;
     }
     while (off + 4 <= n) {
         size_t len = ((size_t)d[off] << 24) | ((size_t)d[off+1] << 16) |
                      ((size_t)d[off+2] << 8) | d[off+3];
-        if (len == 0 || off + 4 + len > n) return written;  /* not AVCC */
-        if (out_append(c, start, 4) != 0) return written;
-        if (out_append(c, d + off + 4, len) != 0) return written;
-        written += 4 + len;
+        if (len == 0 || off + 4 + len > n) return 0;  /* not AVCC */
+        if (out_append(c, start, 4) != 0) return -1;
+        if (out_append(c, d + off + 4, len) != 0) return -1;
+        *written += 4 + len;
         off += 4 + len;
     }
-    return written;
+    return 0;
 }
 
 /* An IDR frame is one whose first slice NAL has type 5. Parameter sets (7, 8),
@@ -522,6 +558,21 @@ static unsigned fetch_sps_pps(VideoEncoder *enc, ScMemOpsS *memops,
 }
 
 /* ── public API ──────────────────────────────────────────────────────────── */
+
+/* Marks the capture dead and returns the failure code for rgsp_capture_next().
+ *
+ * A failed frame can leave the vendor input buffer either already submitted
+ * (AddOneInputBuffer succeeded, encode did not) or not acquired at all
+ * (GetOneAllocInputBuffer failed, leaving inbuf zeroed and _virY NULL). Neither
+ * state is safe to drive again — the old main() sidestepped this by breaking
+ * out of the loop and exiting, but a library that returns -1 invites a retry
+ * that would encode from a NULL pointer or double-submit. */
+static int capture_fail(rgsp_capture *c)
+{
+    c->failed = 1;
+    snprintf(c->fail_msg, sizeof c->fail_msg, "%s", g_last_error);
+    return -1;
+}
 
 /* Same enum block as VENC_IndexParamH264SPSPPS above: the generic parameters
  * start at 0, the H.264-specific ones at 0x100. */
@@ -690,16 +741,22 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
                       size_t *len, int *is_keyframe)
 {
     if (!c) { set_error("null capture"); return -1; }
+    if (c->failed) { set_error("%s", c->fail_msg); return -1; }
 
     /* Pace to the frame deadline before capturing, so each frame samples the
      * screen one frame interval after the last. */
-    long long slack = c->deadline - now_ns();
+    long long now = now_ns();
+    long long slack = c->deadline - now;
     if (slack > 0) {
         struct timespec ts = { .tv_sec = slack / 1000000000LL,
                                .tv_nsec = slack % 1000000000LL };
         nanosleep(&ts, NULL);
     }
     c->deadline += c->frame_ns;
+    /* After a stall the deadline can fall arbitrarily far behind. Without this
+     * clamp the next calls all return instantly, replaying the backlog as a
+     * burst of frames with stale timestamps; drop the missed frames instead. */
+    if (c->deadline < now) c->deadline = now + c->frame_ns;
 
     c->out_len = 0;
 
@@ -715,7 +772,7 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
         c->short_reads++;
         if (n <= 0) {
             set_error("pread(/dev/fb0): %s", n < 0 ? strerror(errno) : "end of file");
-            return -1;
+            return capture_fail(c);
         }
     }
     const uint8_t *fb_src = c->fb_buf;
@@ -750,11 +807,11 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
     p_FlushCacheAllocInputBuffer(c->enc, &c->inbuf);
     if (p_AddOneInputBuffer(c->enc, &c->inbuf) != 0) {
         set_error("AddOneInputBuffer failed at frame %d", c->frames);
-        return -1;
+        return capture_fail(c);
     }
     if (p_VideoEncodeOneFrame(c->enc) != 0) {
         set_error("VideoEncodeOneFrame failed at frame %d", c->frames);
-        return -1;
+        return capture_fail(c);
     }
     c->encode_ns += now_ns() - t1;
 
@@ -770,31 +827,52 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
     }
     if (c->frames == 0 && c->sps_pps_len &&
         out_append(c, c->sps_pps, c->sps_pps_len) != 0)
-        return -1;
+        return capture_fail(c);
+
+    /* Bytes present before the bitstream drain, so a failure to pull the very
+     * first segment can be told apart from the end of a frame's segments. */
+    const size_t before_drain = c->out_len;
 
     while (p_ValidBitstreamFrameNum(c->enc) > 0) {
-        VencOutputBuffer ob;
-        memset(&ob, 0, sizeof ob);
-        if (p_GetOneBitstreamFrame(c->enc, &ob) != 0) break;
+        GuardedOutputBuffer g;
+        VencOutputBuffer *o = &g.ob;
+        size_t w = 0;
+        int bad = 0;
+
+        memset(&g, 0, sizeof g);
+        if (p_GetOneBitstreamFrame(c->enc, o) != 0) {
+            /* Nothing retrieved at all means there is no frame to hand back;
+             * that is a failure, not an early end to the segment list. */
+            if (c->out_len == before_drain) {
+                set_error("GetOneBitstreamFrame failed at frame %d", c->frames);
+                return capture_fail(c);
+            }
+            break;
+        }
 
         /* The vendor exposes the frame as up to two segments of a ring
          * buffer (pData0/nSize0 + pData1/nSize1), with nTotalSize the sum.
          * Only trust the split when it adds up; otherwise treat pData0 as
          * one contiguous run of nTotalSize bytes, which is what
          * cedar-probe does and what this build appears to produce. */
-        if (ob.pData0 && ob.nSize0 &&
-            ob.nSize0 + ob.nSize1 == ob.nTotalSize) {
-            append_avcc_as_annexb(c, ob.pData0, ob.nSize0);
-            if (ob.pData1 && ob.nSize1)
-                append_avcc_as_annexb(c, ob.pData1, ob.nSize1);
-        } else if (ob.pData0 && ob.nTotalSize) {
-            if (append_avcc_as_annexb(c, ob.pData0, ob.nTotalSize) == 0)
-                out_append(c, ob.pData0, ob.nTotalSize);  /* not AVCC — verbatim */
+        if (o->pData0 && o->nSize0 &&
+            o->nSize0 + o->nSize1 == o->nTotalSize) {
+            bad = append_avcc_as_annexb(c, o->pData0, o->nSize0, &w) != 0;
+            if (!bad && o->pData1 && o->nSize1)
+                bad = append_avcc_as_annexb(c, o->pData1, o->nSize1, &w) != 0;
+        } else if (o->pData0 && o->nTotalSize) {
+            bad = append_avcc_as_annexb(c, o->pData0, o->nTotalSize, &w) != 0;
+            if (!bad && w == 0)   /* not AVCC — emit verbatim */
+                bad = out_append(c, o->pData0, o->nTotalSize) != 0;
         }
 
         VLOG("frame %d: total=%u size0=%u size1=%u%s", c->frames,
-             ob.nTotalSize, ob.nSize0, ob.nSize1, ob.bIsKeyFrame ? " (key)" : "");
-        p_FreeOneBitStreamFrame(c->enc, &ob);
+             o->nTotalSize, o->nSize0, o->nSize1, o->bIsKeyFrame ? " (key)" : "");
+        p_FreeOneBitStreamFrame(c->enc, o);
+
+        /* Freed first so the vendor buffer is not leaked on the way out; the
+         * error from out_reserve() is still in the error buffer. */
+        if (bad) return capture_fail(c);
     }
 
     /* Recycle the input buffer for the next frame. */
@@ -805,7 +883,7 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
     if (p_GetOneAllocInputBuffer(c->enc, &c->inbuf) != 0) {
         set_error("GetOneAllocInputBuffer failed at frame %d", c->frames);
         c->held = NULL;
-        return -1;
+        return capture_fail(c);
     }
 
     c->frames++;

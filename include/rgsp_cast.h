@@ -21,7 +21,12 @@ rgsp_capture *rgsp_capture_open(int width, int height, int fps, int bitrate);
 
 /* Blocks until the next frame is due, captures, encodes, and returns the
  * Annex-B bitstream. Returns 0 on success, -1 on failure.
- * The first frame is always a keyframe (SPS + PPS + IDR). */
+ * The first frame is always a keyframe (SPS + PPS + IDR).
+ *
+ * A failure is terminal: the capture object is dead and every later call
+ * returns -1 with the original error. Do not retry — only rgsp_capture_close()
+ * may follow. (A failed frame can leave the encoder's input buffer submitted
+ * or unacquired, so driving it again would work on inconsistent state.) */
 int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
                       size_t *len, int *is_keyframe);
 
