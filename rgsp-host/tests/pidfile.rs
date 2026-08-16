@@ -53,3 +53,19 @@ fn refuses_to_follow_a_symlink_at_the_pidfile_path() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_pidfile_claiming_pid_zero_does_not_block_acquisition() {
+    // kill(0, 0) signals the caller's own process group and always succeeds,
+    // so a PID-liveness check would treat "0" as a live holder forever. Any
+    // unprivileged user can plant this in world-writable /tmp.
+    // With flock-based locking, the PID value is irrelevant; we check the lock, not the PID.
+    let dir = std::env::temp_dir().join("rgsp-pidtest-zero");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("daemon.pid");
+    std::fs::write(&path, "0").unwrap();
+
+    PidFile::acquire(&path).expect("a planted PID 0 must not block startup");
+    let _ = std::fs::remove_dir_all(&dir);
+}
