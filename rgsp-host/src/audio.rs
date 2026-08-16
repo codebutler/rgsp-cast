@@ -1,3 +1,26 @@
+//! ALSA loopback capture for streaming game audio.
+//!
+//! # Known Gap: Loopback Data Path
+//!
+//! The loopback DATA path has no automated regression test.
+//!
+//! An in-process playback test was attempted and abandoned: `writei()` reports
+//! frames written and the playback stream reports no error, but the capture side
+//! reads all zeros (19200 samples, max magnitude 0). Tried explicit
+//! prepare/start orderings, prepare→fill→start, start_threshold via sw_params,
+//! several cables and subdevices, varied tone length and amplitude, and
+//! accumulating across reads.
+//!
+//! The hardware path is known good: feeding /dev/urandom through `aplay` into
+//! hw:Loopback,0,0 while capturing from hw:Loopback,1,0 yields 96255 non-zero
+//! samples across 48128 frames. So this is a defect in how the alsa crate's
+//! playback side is driven here, not a broken cable.
+//!
+//! What IS guarded automatically: parameter negotiation, via the test
+//! `both_cable_ends_can_open_with_matching_params`, which exercises snd-aloop's
+//! loopback_check_format—the failure mode that produces a silent -EIO when
+//! capture and playback disagree on format, rate, or channels.
+
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result};
