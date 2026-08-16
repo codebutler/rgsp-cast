@@ -31,6 +31,21 @@ pub struct VideoConfig {
     pub client_addr: SocketAddr,
 }
 
+/// One encoded frame plus the metadata moonshine-core's packetizer needs.
+///
+/// A borrowed view (`data: &'a [u8]`, no allocation) into the `Capture`
+/// frame that produced it — valid only for the duration of the `send` call
+/// in `VideoStream::run`. The wiring that hands this to
+/// `moonshine_core::session::manager::SessionManager::video_frame_sender()`
+/// (not part of this task; see `run`'s doc comment) will need to clone
+/// `data` into an owned `EncodedFrame` before sending across that channel.
+pub struct EncodedFrameRef<'a> {
+    pub data: &'a [u8],
+    pub is_keyframe: bool,
+    pub frame_number: u32,
+    pub rtp_timestamp: u32,
+}
+
 #[derive(Clone)]
 pub struct IdrRequester {
     flag: Arc<AtomicBool>,
@@ -66,16 +81,18 @@ impl VideoStream {
     /// Runs on a dedicated blocking thread: `Capture::next` sleeps until the
     /// frame deadline and must not occupy a tokio worker.
     ///
-    /// `send` receives the raw encoded (Annex-B) bitstream for one frame per
-    /// call. Packetizing (RTP + FEC + AES-GCM) happens on the other side of
-    /// `send`, inside moonshine-core's protocol layer, which also owns the
-    /// per-frame metadata (keyframe flag, frame number, RTP timestamp) needed
-    /// to build an `EncodedFrame` — this loop only supplies bytes.
+    /// `send` receives one `EncodedFrameRef` per call: the raw encoded
+    /// (Annex-B) bitstream plus the keyframe flag, frame number, and RTP
+    /// timestamp this loop already tracks. Packetizing (RTP + FEC + AES-GCM)
+    /// happens on the other side of `send`, inside moonshine-core's
+    /// protocol layer — the eventual wiring is
+    /// `moonshine_core::session::manager::SessionManager::video_frame_sender()`,
+    /// which is not called from this task's files (see module docs).
     ///
     /// The clamp to the panel's fixed 720x480 geometry happens here, at the
     /// `Capture::open` call: `self.cfg.width`/`height` (the negotiated
     /// Moonlight resolution) are intentionally not passed through.
-    pub fn run(self, mut send: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+    pub fn run(self, mut send: impl FnMut(EncodedFrameRef<'_>) -> Result<()>) -> Result<()> {
         let mut capture = Capture::open(PANEL_WIDTH, PANEL_HEIGHT, self.cfg.fps, self.cfg.bitrate)
             .map_err(|e| anyhow!("Capture::open: {e}"))?;
 
@@ -99,9 +116,14 @@ impl VideoStream {
             // A failure from `Capture::next` is terminal: the capture is
             // dead and must simply be dropped, not retried.
             let frame = capture.next()?;
-            let _rtp = rtp_timestamp_for(frame_number, self.cfg.fps);
+            let rtp_timestamp = rtp_timestamp_for(frame_number, self.cfg.fps);
 
-            send(frame.data)?;
+            send(EncodedFrameRef {
+                data: frame.data,
+                is_keyframe: frame.is_keyframe,
+                frame_number: frame_number as u32,
+                rtp_timestamp,
+            })?;
 
             frame_number += 1;
         }
