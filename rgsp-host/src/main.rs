@@ -188,7 +188,7 @@ async fn serve(userdata: &Path, status: &StatusWriter) -> anyhow::Result<()> {
         false, // No HDR: the panel is 720x480 SDR and Cedar encodes 8-bit H.264.
         unique_id,
         cert,
-        client_manager,
+        client_manager.clone(),
         session_manager.clone(),
         shutdown.clone(),
     )
@@ -202,13 +202,22 @@ async fn serve(userdata: &Path, status: &StatusWriter) -> anyhow::Result<()> {
 
     // Step 6.
     let pump = tokio::spawn(session_pump(
-        session_manager,
-        idle,
+        session_manager.clone(),
+        client_manager,
+        config.webserver.port,
         shutdown.clone(),
         status.clone(),
     ));
 
     shutdown.wait_shutdown_triggered().await;
+
+    // Stop the session explicitly rather than letting `SessionManager`'s
+    // `Drop` do it. That `Drop` calls `Handle::block_on` when a session is
+    // still active, which panics if it runs from inside this async context —
+    // and a panic here would unwind past `main`'s teardown, leaving
+    // `.asoundrc` pointed at the loopback and the handheld with no speaker
+    // audio. Stopping first means `Drop` has nothing left to do.
+    let _ = session_manager.stop_session().await;
     pump.abort();
     Ok(())
 }
@@ -264,7 +273,8 @@ fn spawn_signal_handler(shutdown: ShutdownManager<ShutdownReason>) {
 /// therefore joined before the loop comes round again.
 async fn session_pump(
     session_manager: SessionManager,
-    idle: Status,
+    client_manager: ClientManager,
+    http_port: u16,
     shutdown: ShutdownManager<ShutdownReason>,
     status: StatusWriter,
 ) {
@@ -352,7 +362,14 @@ async fn session_pump(
             return;
         }
         tracing::info!("session ended, waiting for the next client");
-        status.publish(&idle);
+        // Recomputed rather than cached: a first-time user is unpaired at
+        // startup and paired by the time their first session ends, so a cached
+        // line would tell them to pair again. This also refreshes the address
+        // if DHCP moved us.
+        status.publish(&idle_status(
+            client_manager.persistent_state().has_any_client(),
+            http_port,
+        ));
     }
 }
 
