@@ -15,6 +15,6 @@ path = "src/main.rs"
 moonshine-core = { path = "../vendor/moonshine/moonshine-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "io-util"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 anyhow = "1"

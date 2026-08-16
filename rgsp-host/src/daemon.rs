@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 ///
 /// A pid file left behind by a killed process must not wedge the daemon
 /// permanently, so an existing file whose PID is not running is reclaimed.
+#[derive(Debug)]
 pub struct PidFile {
     path: PathBuf,
 }
