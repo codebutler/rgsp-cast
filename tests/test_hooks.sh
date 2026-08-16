@@ -76,7 +76,38 @@ else
     echo "ok: 10-rgsp-route.sh writes .asoundrc routing"
 fi
 
-# Test 4: pre-sleep hook creates was-casting marker when daemon IS running
+# Test 3b: pre-launch hook does not overwrite foreign .asoundrc
+echo "=== Testing pre-launch hook does not overwrite foreign config ==="
+TESTDIR2b="$TMPDIR/rgsp-test-prelaunch-foreign-$$"
+mkdir -p "$TESTDIR2b"
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b'" EXIT
+export RGSP_RUN_DIR="$TESTDIR2b"
+export USERDATA_PATH="$TESTDIR2b"
+mkdir -p "$TESTDIR2b"
+
+# Create daemon PID
+echo "$$" > "$TESTDIR2b/daemon.pid"
+
+# Create a foreign .asoundrc (without our marker)
+cat > "$TESTDIR2b/.asoundrc" <<'EOF'
+# User's custom Bluetooth routing
+pcm.!default {
+    type pulse
+}
+EOF
+
+# Run pre-launch hook - should NOT overwrite this file
+sh "$HERE"/../pak/hooks/pre-launch.d/10-rgsp-route.sh >/dev/null 2>&1 || true
+
+# Verify .asoundrc still contains user's config (not ours)
+if grep -q 'type pulse' "$TESTDIR2b/.asoundrc" 2>/dev/null; then
+    echo "ok: 10-rgsp-route.sh leaves foreign .asoundrc alone"
+else
+    echo "FAIL: 10-rgsp-route.sh overwrote foreign .asoundrc"
+    FAIL=1
+fi
+
+# Test 4: pre-sleep hook creates was-casting marker and stops daemon
 echo "=== Testing pre-sleep hook ==="
 TESTDIR3="$TMPDIR/rgsp-test-presleep-$$"
 mkdir -p "$TESTDIR3"
@@ -88,42 +119,93 @@ mkdir -p "$TESTDIR3"
 sleep 100 & FAKE_DAEMON_PID=$!
 echo "$FAKE_DAEMON_PID" > "$TESTDIR3/daemon.pid"
 
-# Run pre-sleep hook - should create was-casting marker
+# Run pre-sleep hook - should create was-casting marker and stop daemon
 sh "$HERE"/../pak/hooks/pre-sleep.d/10-rgsp-stop.sh >/dev/null 2>&1 || true
-
-# Clean up the background process
-kill "$FAKE_DAEMON_PID" 2>/dev/null || true
 
 # Verify was-casting file was created
 if [ ! -f "$TESTDIR3/was-casting" ]; then
     echo "FAIL: 10-rgsp-stop.sh did not create was-casting marker"
     FAIL=1
 else
-    echo "ok: 10-rgsp-stop.sh creates was-casting marker"
+    # Verify daemon was actually stopped (kill -0 must fail)
+    if kill -0 "$FAKE_DAEMON_PID" 2>/dev/null; then
+        echo "FAIL: 10-rgsp-stop.sh did not stop daemon"
+        FAIL=1
+        kill "$FAKE_DAEMON_PID" 2>/dev/null || true
+    else
+        echo "ok: 10-rgsp-stop.sh stops daemon and creates was-casting marker"
+    fi
 fi
 
-# Test 5: post-resume hook checks for was-casting marker
-echo "=== Testing post-resume hook ==="
+# Test 5a: post-resume hook does not start daemon when no was-casting marker
+echo "=== Testing post-resume hook (no restart case) ==="
 TESTDIR4="$TMPDIR/rgsp-test-postresume-$$"
 mkdir -p "$TESTDIR4"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4'" EXIT
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b' '$TESTDIR3' '$TESTDIR4'" EXIT
 export RGSP_RUN_DIR="$TESTDIR4"
-mkdir -p "$TESTDIR4"
+export RGSP_PAK_DIR="$TESTDIR4/pak"
+mkdir -p "$TESTDIR4" "$TESTDIR4/pak"
 
-# Without was-casting file, hook should exit early
-sh "$HERE"/../pak/hooks/post-resume.d/10-rgsp-resume.sh >/dev/null 2>&1 || true
-echo "ok: 10-rgsp-resume.sh exits early without was-casting marker"
+# Create recording stub for rgsp-host in PAK_DIR
+cat > "$TESTDIR4/pak/rgsp-host" <<'EOF'
+#!/bin/sh
+echo "$@" >> "$RGSP_RUN_DIR/rgsp-host.calls"
+exit 0
+EOF
+chmod +x "$TESTDIR4/pak/rgsp-host"
 
-# With was-casting file, hook should remove it (and try to start daemon, which will fail but that's ok)
-touch "$TESTDIR4/was-casting"
+# Without was-casting file, hook should exit early and NOT call rgsp-host
 sh "$HERE"/../pak/hooks/post-resume.d/10-rgsp-resume.sh >/dev/null 2>&1 || true
+
+# Verify rgsp-host was NOT called
+if [ ! -f "$TESTDIR4/rgsp-host.calls" ] || [ ! -s "$TESTDIR4/rgsp-host.calls" ]; then
+    echo "ok: 10-rgsp-resume.sh does not start daemon without was-casting marker"
+else
+    echo "FAIL: 10-rgsp-resume.sh started daemon without was-casting marker"
+    FAIL=1
+fi
+
+# Test 5b: post-resume hook removes marker and starts daemon when marker present
+echo "=== Testing post-resume hook (restart case) ==="
+TESTDIR5="$TMPDIR/rgsp-test-postresume-restart-$$"
+mkdir -p "$TESTDIR5"
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR2b' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5'" EXIT
+export RGSP_RUN_DIR="$TESTDIR5"
+export RGSP_PAK_DIR="$TESTDIR5/pak"
+mkdir -p "$TESTDIR5" "$TESTDIR5/pak"
+
+# Create recording stub for rgsp-host in PAK_DIR
+cat > "$TESTDIR5/pak/rgsp-host" <<'EOF'
+#!/bin/sh
+echo "RGSP_HOST CALLED WITH: $@"
+exit 0
+EOF
+chmod +x "$TESTDIR5/pak/rgsp-host"
+
+# Create mock lib directory for LD_LIBRARY_PATH
+mkdir -p "$TESTDIR5/pak/lib/h700"
+
+# Create was-casting marker
+touch "$TESTDIR5/was-casting"
+
+# Run hook - should remove marker and start daemon
+sh "$HERE"/../pak/hooks/post-resume.d/10-rgsp-resume.sh >/dev/null 2>&1 || true
+
+# Give background process a chance to run
+sleep 0.5
 
 # Verify was-casting file was removed
-if [ -f "$TESTDIR4/was-casting" ]; then
+if [ -f "$TESTDIR5/was-casting" ]; then
     echo "FAIL: 10-rgsp-resume.sh did not remove was-casting marker"
     FAIL=1
 else
-    echo "ok: 10-rgsp-resume.sh removes was-casting marker"
+    # Verify rgsp-host was called (check daemon.log shows it ran)
+    if [ -f "$TESTDIR5/daemon.log" ] && grep -q "RGSP_HOST" "$TESTDIR5/daemon.log" 2>/dev/null; then
+        echo "ok: 10-rgsp-resume.sh removes marker and starts daemon"
+    else
+        echo "FAIL: 10-rgsp-resume.sh did not start daemon"
+        FAIL=1
+    fi
 fi
 
 # Test 6: boot hook leaves live daemon's .asoundrc alone
