@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, CStr};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
 struct RgspCapture {
@@ -36,19 +37,41 @@ pub struct Frame<'a> {
     pub is_keyframe: bool,
 }
 
+/// At most one Capture may exist per process.
+///
+/// The C library keeps process-global state: a static error buffer written by
+/// every failure path, and dlopen'd vendor handles. Two Captures on different
+/// threads would race on the error string. The hardware agrees: there is one
+/// Cedar video engine and one framebuffer, so a second capture was never
+/// meaningful. Enforcing it here makes `Send` sound by construction rather
+/// than by convention: a Capture can be moved to another thread, and there is
+/// never a second one to race with.
+static CAPTURE_OPEN: AtomicBool = AtomicBool::new(false);
+
 pub struct Capture {
     handle: *mut RgspCapture,
 }
 
-// The handle is only ever touched from the thread that owns the Capture.
+/// `Capture` can be sent to other threads because the single-instance guard
+/// (`CAPTURE_OPEN`) prevents concurrent access to process-global C state.
 unsafe impl Send for Capture {}
 
 impl Capture {
     pub fn open(width: u32, height: u32, fps: u32, bitrate: u32) -> Result<Capture> {
+        // Claim the single capture slot.
+        if CAPTURE_OPEN
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(anyhow!("a capture is already open"));
+        }
+
         let handle = unsafe {
             rgsp_capture_open(width as c_int, height as c_int, fps as c_int, bitrate as c_int)
         };
         if handle.is_null() {
+            // C open failed; release the slot before returning the error.
+            CAPTURE_OPEN.store(false, Ordering::SeqCst);
             return Err(anyhow!("rgsp_capture_open: {}", last_error()));
         }
         Ok(Capture { handle })
@@ -69,8 +92,14 @@ impl Capture {
         if rc != 0 {
             return Err(anyhow!("rgsp_capture_next: {}", last_error()));
         }
+        // Guard against null pointer even though the C API should not return it.
+        let data = if data.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len) }
+        };
         Ok(Frame {
-            data: unsafe { std::slice::from_raw_parts(data, len) },
+            data,
             is_keyframe: key != 0,
         })
     }
@@ -83,8 +112,7 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         unsafe { rgsp_capture_close(self.handle) }
+        // Release the single capture slot after close completes.
+        CAPTURE_OPEN.store(false, Ordering::SeqCst);
     }
 }
-
-// Silences an unused-import warning on the c_void import in some toolchains.
-const _: Option<*const c_void> = None;

@@ -25,3 +25,32 @@ fn captures_annexb_frames_starting_with_a_keyframe() {
     let f = cap.next().expect("forced idr");
     assert!(f.is_keyframe);
 }
+
+#[test]
+fn single_instance_guard_enforces_one_capture_per_process() {
+    if !std::path::Path::new("/dev/fb0").exists() {
+        eprintln!("skipping: no /dev/fb0");
+        return;
+    }
+
+    // Open the first capture.
+    let cap1 = Capture::open(720, 480, 30, 2_000_000).expect("first open");
+
+    // Attempt to open a second capture while the first is held.
+    match Capture::open(720, 480, 30, 2_000_000) {
+        Err(e) => {
+            assert!(
+                e.to_string().contains("already open"),
+                "error message should mention 'already open', got: {}",
+                e
+            );
+        }
+        Ok(_) => panic!("second open should fail while first is held"),
+    }
+
+    // Drop the first capture.
+    drop(cap1);
+
+    // Now we should be able to open a capture again.
+    Capture::open(720, 480, 30, 2_000_000).expect("open should succeed after first is dropped");
+}
