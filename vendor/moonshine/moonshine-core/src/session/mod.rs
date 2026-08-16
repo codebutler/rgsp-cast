@@ -205,6 +205,7 @@ impl LaunchedSession {
 		audio_ctx: AudioStreamContext,
 		frame_rx: mpsc::Receiver<EncodedFrame>,
 		control_tx: mpsc::Sender<EncoderControl>,
+		pcm_rx: mpsc::Receiver<Vec<i16>>,
 		stop: ShutdownManager<SessionShutdownReason>,
 	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>), ()> {
 		let Self {
@@ -229,9 +230,11 @@ impl LaunchedSession {
 			.start(video_config, video_ctx, keys_rx.clone(), frame_rx, control_tx, stop.clone())
 			.map_err(|()| tracing::error!("Failed to start video stream"))?;
 
-		// Start audio stream — gated, returns AudioStartHandle.
+		// Start audio stream — gated, returns AudioStartHandle. `pcm_rx`
+		// carries raw i16 PCM in from the host's capture; the audio stream's
+		// `host_source` bridges it into Opus-ready `AudioFrame`s.
 		let audio_trigger = audio
-			.start(audio_ctx, keys_rx)
+			.start(audio_ctx, keys_rx, pcm_rx)
 			.map_err(|()| tracing::error!("Failed to start audio stream"))?;
 
 		// Clone the start notifies for external triggering (e.g. bench binary).

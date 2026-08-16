@@ -35,6 +35,8 @@ pub enum SessionShutdownReason {
 	AudioPacketHandlerStopped,
 	/// Audio encoder stopped unexpectedly.
 	AudioEncoderStopped,
+	/// Audio source (the host's PCM bridge) stopped unexpectedly.
+	AudioSourceStopped,
 	/// Control stream stopped unexpectedly.
 	ControlStreamStopped,
 }
@@ -84,6 +86,11 @@ struct SessionManagerInner {
 	/// video stream is active. `None` until `start_session()` succeeds.
 	video_frame_tx: Option<mpsc::Sender<EncodedFrame>>,
 
+	/// Sender for raw i16 PCM samples, handed to the host's audio capture
+	/// once the audio stream is active. `None` until `start_session()`
+	/// succeeds.
+	audio_frame_tx: Option<mpsc::Sender<Vec<i16>>>,
+
 	/// Receiving end of the packetize loop's `EncoderControl` channel —
 	/// client recovery requests (IDR / reference invalidation / reset),
 	/// mapped and forwarded from inside the crate. Taken (not cloned) by
@@ -121,6 +128,7 @@ impl SessionManagerInner {
 		self.video_start_notify = None;
 		self.audio_start_notify = None;
 		self.video_frame_tx = None;
+		self.audio_frame_tx = None;
 		self.encoder_control_rx = None;
 		self.stop = ShutdownManager::new();
 	}
@@ -179,6 +187,7 @@ impl SessionManager {
 			video_start_notify: None,
 			audio_start_notify: None,
 			video_frame_tx: None,
+			audio_frame_tx: None,
 			encoder_control_rx: None,
 			shutdown: shutdown.clone(),
 			_trigger_token: trigger_token,
@@ -206,6 +215,21 @@ impl SessionManager {
 	/// there, alongside the video stream that owns the receiving end.
 	pub async fn video_frame_sender(&self) -> Option<mpsc::Sender<EncodedFrame>> {
 		self.inner.lock().await.video_frame_tx.clone()
+	}
+
+	/// Sender for raw interleaved i16 PCM samples, for the host's audio
+	/// capture to feed once the audio stream is active. Each item must be
+	/// exactly one Opus frame's worth of samples (`FRAME_FRAMES` times the
+	/// channel count, see `audio::host_source`); mismatched chunks are
+	/// dropped with a warning rather than fed to Moonshine's own Opus
+	/// encoder, which still owns the real encode (unlike video, this
+	/// crate's audio encoder was never removed; only the PulseAudio
+	/// producer was).
+	///
+	/// `None` until `start_session()` has succeeded — the channel is created
+	/// there, alongside the audio stream that owns the receiving end.
+	pub async fn audio_frame_sender(&self) -> Option<mpsc::Sender<Vec<i16>>> {
+		self.inner.lock().await.audio_frame_tx.clone()
 	}
 
 	/// Take the receiving end of client recovery requests (IDR / reference
@@ -442,6 +466,13 @@ impl SessionManager {
 		// human-timescale events, not a per-frame stream — forward_control()
 		// in host_source.rs drops rather than blocks if it ever fills.
 		let (control_tx, control_rx) = mpsc::channel::<EncoderControl>(8);
+		// Channel the host's audio capture feeds via `audio_frame_sender()`;
+		// the receiving end is bridged into Opus-ready `AudioFrame`s by the
+		// audio stream's `host_source`. Same bound and backpressure
+		// reasoning as `frame_tx` above — capture is expected to run on a
+		// dedicated blocking thread, so a full channel stalling it is
+		// preferable to dropping audio samples.
+		let (audio_frame_tx, audio_pcm_rx) = mpsc::channel::<Vec<i16>>(4);
 		let mut guard = self.inner.lock().await;
 		let video_config = guard.video_config.clone();
 		let stream_timeout = guard.stream_timeout;
@@ -453,6 +484,7 @@ impl SessionManager {
 				audio_stream_context,
 				frame_rx,
 				control_tx,
+				audio_pcm_rx,
 				stop,
 			)
 			.await
@@ -462,6 +494,7 @@ impl SessionManager {
 				guard.video_start_notify = Some(video_notify);
 				guard.audio_start_notify = Some(audio_notify);
 				guard.video_frame_tx = Some(frame_tx);
+				guard.audio_frame_tx = Some(audio_frame_tx);
 				guard.encoder_control_rx = Some(control_rx);
 				Ok(())
 			},

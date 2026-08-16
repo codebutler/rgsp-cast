@@ -11,8 +11,10 @@ use crate::session::SessionKeysReceiver;
 use crate::session::manager::SessionShutdownReason;
 
 use self::encoder::AudioEncoder;
+use self::host_source::spawn_pcm_bridge;
 
 mod encoder;
+mod host_source;
 
 /// The audio source emits samples at this rate to the encoder.
 pub(crate) const CAPTURE_SAMPLE_RATE: u32 = 48000;
@@ -226,7 +228,12 @@ impl AudioStream {
 		Ok(AudioStream { udp_socket, stop })
 	}
 
-	pub fn start(self, context: AudioStreamContext, keys_rx: SessionKeysReceiver) -> Result<AudioStartHandle, ()> {
+	pub fn start(
+		self,
+		context: AudioStreamContext,
+		keys_rx: SessionKeysReceiver,
+		pcm_rx: mpsc::Receiver<Vec<i16>>,
+	) -> Result<AudioStartHandle, ()> {
 		// Apply QoS to UDP socket.
 		if context.qos {
 			let _ = self.udp_socket.set_tos_v4(224);
@@ -240,10 +247,20 @@ impl AudioStream {
 		spawn_handle_audio_packets(packet_rx, self.udp_socket, start_notify.clone(), self.stop.clone());
 
 		// Create frame channels for the audio source and encoder communication.
-		// The producer side (`_frame_tx` / `_frame_recycle_rx`) had no in-crate owner
-		// once the PulseAudio server was removed; the host binary supplies the samples.
-		let (_frame_tx, frame_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
-		let (frame_recycle_tx, _frame_recycle_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
+		let (frame_tx, frame_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
+		let (frame_recycle_tx, frame_recycle_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
+
+		// Bridge host-supplied i16 PCM (`pcm_rx`) into `AudioFrame`s for the
+		// encoder — gated behind start_notify. Replaces the deleted
+		// PulseAudio server as the producer; see `host_source` module docs.
+		spawn_pcm_bridge(
+			pcm_rx,
+			context.audio_config.channels as u8,
+			frame_tx,
+			frame_recycle_rx,
+			start_notify.clone(),
+			self.stop.clone(),
+		);
 
 		// Spawn audio encoder — gated behind start_notify.
 		AudioEncoder::spawn(
