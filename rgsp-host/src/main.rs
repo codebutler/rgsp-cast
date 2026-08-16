@@ -93,6 +93,17 @@ fn main() -> std::process::ExitCode {
     // Step 3.
     status.publish(&Status::Starting);
 
+    // Loaded before the runtime exists: it sets `XDG_DATA_HOME`, and mutating
+    // the environment with other threads running is the pattern Rust 2024 made
+    // `unsafe`. Nothing here needs async.
+    let config = match load_config(&userdata) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("{e:#}");
+            return shutdown(status, cast_sink, pidfile, std::process::ExitCode::FAILURE);
+        }
+    };
+
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
@@ -101,7 +112,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let outcome = runtime.block_on(serve(&userdata, &status));
+    let outcome = runtime.block_on(serve(config, &status));
     // The hardware loops run as blocking tasks, and dropping a `Runtime`
     // waits for those to finish. A capture loop parked in ALSA or the Cedar
     // driver must not delay restoring the speaker, so give them a moment and
@@ -138,8 +149,7 @@ fn shutdown(
     code
 }
 
-async fn serve(userdata: &Path, status: &StatusWriter) -> anyhow::Result<()> {
-    let config = load_config(userdata)?;
+async fn serve(config: Config, status: &StatusWriter) -> anyhow::Result<()> {
     tracing::debug!("using configuration:\n{config:#?}");
 
     let shutdown = ShutdownManager::new();
@@ -300,6 +310,16 @@ async fn session_pump(
         let audio_tx = session_manager.audio_frame_sender().await;
         let control_rx = session_manager.encoder_control_receiver().await;
 
+        // The client chooses this, and `rtp_timestamp_for` divides by it, so a
+        // malformed ANNOUNCE carrying 0 would panic the video task and tear the
+        // session down. Clamp once, here, and use this one value everywhere
+        // below — the encoder's pacing and the 90 kHz RTP clock must never
+        // disagree.
+        let fps = context.fps.max(1);
+        if fps != context.fps {
+            tracing::warn!("client negotiated {} fps; clamped to {fps}", context.fps);
+        }
+
         // Moonlight negotiates its own resolution (commonly 1280x720);
         // `VideoStream::run` clamps to the panel geometry and logs. The status
         // line reports what the client will actually decode.
@@ -307,20 +327,19 @@ async fn session_pump(
             client: "Moonlight".to_string(),
             width: PANEL_WIDTH,
             height: PANEL_HEIGHT,
-            fps: context.fps,
+            fps,
         });
         tracing::info!(
-            "session started: {}x{} @ {} fps, {} bps requested",
+            "session started: {}x{} @ {fps} fps, {} bps requested",
             context.width,
             context.height,
-            context.fps,
             context.bitrate,
         );
 
         let video = VideoStream::new(VideoConfig {
             width: context.width,
             height: context.height,
-            fps: context.fps,
+            fps,
             bitrate: context.bitrate as u32,
             packet_size: context.packet_size,
             fec_percentage: 0,

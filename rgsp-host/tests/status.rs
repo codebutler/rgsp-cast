@@ -32,8 +32,45 @@ fn status_lines_lead_with_what_the_user_needs() {
 #[test]
 fn publish_never_blocks_when_the_fifo_has_no_reader() {
     // show2 may not be running. A status update must never wedge the daemon.
+    //
+    // A real FIFO, not a missing path: opening a *missing* path fails with
+    // ENOENT immediately, which is the easy case and not the one that matters.
+    // The case the daemon actually hits is show2 having exited while its FIFO
+    // remains — an open(2) that blocks forever without O_NONBLOCK, and returns
+    // ENXIO with it. Only a real FIFO with no reader exercises that.
     let path = std::env::temp_dir().join("rgsp-status-test.fifo");
     let _ = std::fs::remove_file(&path);
-    let w = StatusWriter::new(path.clone());
-    w.publish(&Status::Starting); // must return promptly and not panic
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("path");
+    assert_eq!(
+        unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) },
+        0,
+        "mkfifo failed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    // Published on another thread with a deadline, so that losing O_NONBLOCK
+    // fails this test in two seconds instead of hanging the suite forever —
+    // the failure mode it exists to catch is precisely an open(2) that never
+    // returns.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let publish_path = path.clone();
+    std::thread::spawn(move || {
+        StatusWriter::new(publish_path).publish(&Status::Starting);
+        let _ = tx.send(());
+    });
+
+    let finished = rx.recv_timeout(std::time::Duration::from_secs(2));
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        finished.is_ok(),
+        "publish blocked on a reader-less FIFO; show2 exiting would wedge the daemon"
+    );
+}
+
+#[test]
+fn publish_survives_a_missing_fifo() {
+    // show2 may never have started at all.
+    let path = std::env::temp_dir().join("rgsp-status-test-missing.fifo");
+    let _ = std::fs::remove_file(&path);
+    StatusWriter::new(path).publish(&Status::Starting);
 }

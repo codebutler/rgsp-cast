@@ -38,7 +38,13 @@ fn protocol_layer_is_public() {
 	// The negotiated fps/bitrate the host's hardware encoder is configured from.
 	let _ = moonshine_core::session::manager::SessionManager::active_video_context;
 	// Whether any client is paired, which decides the on-screen status line.
+	// `PersistentState` lives in a `pub(crate)` module and cannot be named from
+	// out here, so the guard calls the method through the accessor instead —
+	// which fails to compile just the same if either is narrowed.
 	let _ = moonshine_core::clients::ClientManager::persistent_state;
+	fn _has_any_client(client_manager: &moonshine_core::clients::ClientManager) -> bool {
+		client_manager.persistent_state().has_any_client()
+	}
 	// The Opus frame size the host's capture period must match. Re-exported
 	// from the private `host_source` module; rgsp-host asserts equality with
 	// its own PERIOD_FRAMES at compile time, which needs this to stay `pub`.
