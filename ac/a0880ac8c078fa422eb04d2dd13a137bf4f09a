@@ -1,0 +1,20 @@
+rgsp-host/src/routing.rs
+  s_5335a78adb4cf1::t_cc9d88e230b808 64-65
+  s_5335a78adb4cf1::t_c6ac44a649ab95 58-61,63,66-73,75-84,86,88-89,91-107,111-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "aca0880ac8c078fa422eb04d2dd13a137bf4f09a",
+  "prompts": {},
+  "sessions": {
+    "s_5335a78adb4cf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "26db82e2-b784-45af-a7b4-f0771a3db06b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
