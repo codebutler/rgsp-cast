@@ -126,5 +126,113 @@ else
     echo "ok: 10-rgsp-resume.sh removes was-casting marker"
 fi
 
+# Test 6: boot hook leaves live daemon's .asoundrc alone
+echo "=== Testing boot hook does not remove live daemon's .asoundrc ==="
+TESTDIR5="$TMPDIR/rgsp-test-boot-live-$$"
+mkdir -p "$TESTDIR5"
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5'" EXIT
+export RGSP_RUN_DIR="$TESTDIR5"
+export USERDATA_PATH="$TESTDIR5"
+
+# Create our marker file and a live daemon PID
+cat > "$TESTDIR5/.asoundrc" <<'EOF'
+# rgsp-cast: routing playback into the kernel loopback while casting.
+pcm.!default {
+    type plug
+    slave.pcm "hw:Loopback,0,0"
+}
+EOF
+echo "$$" > "$TESTDIR5/daemon.pid"
+
+# Run boot hook - should NOT remove the file because daemon is alive
+sh "$HERE"/../pak/hooks/boot.d/10-rgsp-aloop.sh >/dev/null 2>&1 || true
+
+# Verify file still exists (daemon is alive, so recovery should not trigger)
+if [ ! -f "$TESTDIR5/.asoundrc" ]; then
+    echo "FAIL: 10-rgsp-aloop.sh removed .asoundrc while daemon was running"
+    FAIL=1
+else
+    echo "ok: 10-rgsp-aloop.sh leaves live daemon's .asoundrc alone"
+fi
+
+# Test 7: boot hook leaves foreign .asoundrc alone
+echo "=== Testing boot hook does not remove foreign .asoundrc ==="
+TESTDIR6="$TMPDIR/rgsp-test-boot-foreign-$$"
+mkdir -p "$TESTDIR6"
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6'" EXIT
+export RGSP_RUN_DIR="$TESTDIR6"
+export USERDATA_PATH="$TESTDIR6"
+
+# Create a foreign .asoundrc (no our marker)
+cat > "$TESTDIR6/.asoundrc" <<'EOF'
+# User's Bluetooth routing
+pcm.!default {
+    type pulse
+}
+EOF
+
+# Run boot hook - should NOT remove this file (no our marker)
+sh "$HERE"/../pak/hooks/boot.d/10-rgsp-aloop.sh >/dev/null 2>&1 || true
+
+# Verify file still exists
+if [ ! -f "$TESTDIR6/.asoundrc" ]; then
+    echo "FAIL: 10-rgsp-aloop.sh removed foreign .asoundrc"
+    FAIL=1
+else
+    echo "ok: 10-rgsp-aloop.sh leaves foreign .asoundrc alone"
+fi
+
+# Test 8: boot hook skips insmod when module is already loaded
+echo "=== Testing boot hook skips insmod when module is loaded ==="
+TESTDIR7="$TMPDIR/rgsp-test-boot-insmod-$$"
+mkdir -p "$TESTDIR7"
+trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6' '$TESTDIR7'" EXIT
+export RGSP_RUN_DIR="$TESTDIR7"
+export USERDATA_PATH="$TESTDIR7"
+export RGSP_PAK_DIR="$TESTDIR7/pak"
+mkdir -p "$TESTDIR7/pak"
+
+# Create dummy module file
+touch "$TESTDIR7/pak/snd-aloop.ko"
+
+# Create a test environment where module is "already loaded"
+# The hook checks: lsmod 2>/dev/null | grep -q '^snd_aloop' && exit 0
+# We test this by providing a fake lsmod that reports the module is loaded
+mkdir -p "$TESTDIR7/bin"
+cat > "$TESTDIR7/bin/lsmod" <<'EOF'
+#!/bin/sh
+echo "snd_aloop 12345 1 - Live 0x00000000"
+exit 0
+EOF
+chmod +x "$TESTDIR7/bin/lsmod"
+
+# Run boot hook - it should exit early at the lsmod check
+export PATH="$TESTDIR7/bin:$PATH"
+if sh "$HERE"/../pak/hooks/boot.d/10-rgsp-aloop.sh >/dev/null 2>&1; then
+    echo "ok: 10-rgsp-aloop.sh skips insmod when module already loaded"
+else
+    echo "FAIL: 10-rgsp-aloop.sh did not exit cleanly when module loaded"
+    FAIL=1
+fi
+
+# Test 9: Check committed file modes are 100755
+echo "=== Checking committed file modes ==="
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    for hook in pak/hooks/*/*.sh tests/test_hooks.sh; do
+        mode=$(git ls-tree HEAD "$hook" 2>/dev/null | awk '{print $1}')
+        if [ "$mode" = "100755" ]; then
+            echo "ok: $hook has mode 100755"
+        elif [ -z "$mode" ]; then
+            echo "FAIL: $hook is not committed"
+            FAIL=1
+        else
+            echo "FAIL: $hook has mode $mode, expected 100755"
+            FAIL=1
+        fi
+    done
+else
+    echo "SKIP: not in git repository, skipping mode check"
+fi
+
 echo ""
 [ "$FAIL" -eq 0 ] && echo PASS || { echo FAILED; exit 1; }
