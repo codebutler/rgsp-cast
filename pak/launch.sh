@@ -18,6 +18,17 @@ mkdir -p "$RUN_DIR"
 # The vendor CedarC libraries live in the pak, fetched at install time.
 export LD_LIBRARY_PATH="$PAK_DIR/lib/${PLATFORM:-h700}:$LD_LIBRARY_PATH"
 
+# Detect usleep availability to set appropriate iteration counts for sleep fallback.
+# usleep path: 100ms per iteration → 150 iters = 15s, 50 iters = 5s
+# fallback (sleep 0.25): 250ms per iteration → 60 iters = 15s, 20 iters = 5s
+if usleep 1 2>/dev/null; then
+    STOP_WAIT_ITERS=150
+    START_WAIT_ITERS=50
+else
+    STOP_WAIT_ITERS=60
+    START_WAIT_ITERS=20
+fi
+
 show_status() {
     # Show status with optional text message (progress mode if text provided, simple otherwise).
     # Usage: show_status [text_message]
@@ -41,7 +52,7 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     # The daemon removes its own pidfile on clean exit; give it up to ~15 seconds.
     # Use usleep (100ms) with fallback to sleep 0.25 for BusyBox compatibility.
     i=0
-    while [ -f "$PID_FILE" ] && [ $i -lt 150 ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
+    while [ -f "$PID_FILE" ] && [ $i -lt "$STOP_WAIT_ITERS" ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
     # If file is gone, daemon exited cleanly. If still there, leave it alone:
     # the daemon is still shutting down normally. Deleting the file would cause
     # the next launch to start a second instance, which loses the flock.
@@ -59,6 +70,6 @@ else
     i=0
     # Wait up to ~5 seconds for daemon to write PID file.
     # Use usleep (100ms) with fallback to sleep 0.25 for BusyBox compatibility.
-    while [ ! -f "$PID_FILE" ] && [ $i -lt 50 ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
+    while [ ! -f "$PID_FILE" ] && [ $i -lt "$START_WAIT_ITERS" ]; do i=$((i+1)); usleep 100000 2>/dev/null || sleep 0.25; done
     show_status "Casting started"
 fi
