@@ -555,7 +555,7 @@ impl Webserver {
 		response += &format!("<HttpsPort>{}</HttpsPort>", self.webserver_config.port_https);
 		response += "<ExternalPort></ExternalPort>";
 		response += &format!("<mac>{}</mac>", mac_address.unwrap_or("".to_string()));
-		response += "<MaxLumaPixelsHEVC>1869449984</MaxLumaPixelsHEVC>"; // TODO: Check if HEVC is supported, set this to 0 if it is not.
+		response += "<MaxLumaPixelsHEVC>0</MaxLumaPixelsHEVC>"; // This project encodes H.264 only (Cedar has no HEVC path).
 		response += &format!("<LocalIP>{}</LocalIP>", escape_xml(local_ip));
 		let server_codec_mode_support = self.supported_codecs;
 		response += &format!(

@@ -143,7 +143,13 @@ impl RtspServer {
 			self.encryption_flags_supported()
 		));
 		result.push_str("sprop-parameter-sets=AAAAAU\n");
-		result.push_str("a=x-nv-video[0].refPicInvalidation:1\n");
+		// The Vulkan encoder this was written for could invalidate individual
+		// reference frames on request; Cedar (the encoder this project
+		// actually drives) exposes no such API, so advertising support here
+		// would make Moonlight send InvalidateReferenceFrames instead of
+		// RequestIdrFrame on packet loss — a request we can't act on any
+		// more cheaply than a full IDR. Advertise the honest capability.
+		result.push_str("a=x-nv-video[0].refPicInvalidation:0\n");
 		result.push_str("a=rtpmap:98 AV1/90000\n");
 		result.push_str("a=fmtp:96 packetization-mode=1\n");
 
