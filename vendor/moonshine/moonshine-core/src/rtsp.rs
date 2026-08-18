@@ -142,7 +142,16 @@ impl RtspServer {
 			"a=x-ss-general.encryptionSupported:{}\n",
 			self.encryption_flags_supported()
 		));
-		result.push_str("sprop-parameter-sets=AAAAAU\n");
+		// NOT advertised: "sprop-parameter-sets=AAAAAU". That string is the
+		// base64 prefix of an HEVC VPS NALU, and moonlight-common-c decides the
+		// host supports HEVC purely by string-matching it in this payload
+		// (RtspConnection.c: `strstr(response.payload, "sprop-parameter-sets=AAAAAU")`).
+		// It does NOT consult ServerCodecModeSupport for that decision, so
+		// advertising H.264-only there is not enough. Upstream emitted this
+		// because its Vulkan encoder really did do HEVC; Cedar here does not,
+		// and a client that picks HEVC gets an H.264 stream it will never
+		// decode - it waits for an HEVC VPS that never arrives and reports
+		// only a generic connection error, with nothing logged on either side.
 		// The Vulkan encoder this was written for could invalidate individual
 		// reference frames on request; Cedar (the encoder this project
 		// actually drives) exposes no such API, so advertising support here
@@ -150,7 +159,9 @@ impl RtspServer {
 		// RequestIdrFrame on packet loss — a request we can't act on any
 		// more cheaply than a full IDR. Advertise the honest capability.
 		result.push_str("a=x-nv-video[0].refPicInvalidation:0\n");
-		result.push_str("a=rtpmap:98 AV1/90000\n");
+		// Likewise omitted: "a=rtpmap:98 AV1/90000". The same negotiation
+		// selects AV1 whenever the payload contains "AV1/90000" and the client
+		// has AV1 hardware, which would fail the same silent way.
 		result.push_str("a=fmtp:96 packetization-mode=1\n");
 
 		// Emit surround-params for each Opus configuration.

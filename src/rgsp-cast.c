@@ -520,6 +520,26 @@ static int annexb_first_slice_is_idr(const unsigned char *d, size_t n)
     return 0;
 }
 
+/* True when the access unit already opens with a parameter set (7 or 8), so
+ * the keyframe prepend does not duplicate sets the encoder itself emitted. */
+static int annexb_starts_with_parameter_sets(const unsigned char *d, size_t n)
+{
+    size_t i = 0;
+    while (i + 4 <= n) {
+        size_t sc = 0;
+        if (d[i] == 0 && d[i+1] == 0 && d[i+2] == 0 && d[i+3] == 1)      sc = 4;
+        else if (d[i] == 0 && d[i+1] == 0 && d[i+2] == 1)                sc = 3;
+        if (!sc || i + sc >= n) { i++; continue; }
+        unsigned type = d[i + sc] & 0x1f;
+        /* First NAL that carries picture data decides: a leading 7/8 means the
+         * sets are already there, a leading slice means they are not. */
+        if (type == 7 || type == 8) return 1;
+        if (type == 1 || type == 5) return 0;
+        i += sc;
+    }
+    return 0;
+}
+
 /* Fetch the H.264 parameter sets.
  *
  * The index is 0x101: vencoder.h puts the H.264 parameters in their own block
@@ -611,11 +631,24 @@ static int capture_fail(rgsp_capture *c)
 
 /* Same enum block as VENC_IndexParamH264SPSPPS above: the generic parameters
  * start at 0, the H.264-specific ones at 0x100. */
-#define VENC_IndexParamBitrate       0x0
-#define VENC_IndexParamForceKeyFrame 0x6
+#define VENC_IndexParamBitrate        0x0
+#define VENC_IndexParamMaxKeyInterval 0x2
+#define VENC_IndexParamForceKeyFrame  0x6
 
 rgsp_capture *rgsp_capture_open_ex(int width, int height, int fps, int bitrate,
                                    int in_fmt, int stride_bytes)
+{
+    return rgsp_capture_open_scaled_ex(width, height, 0, 0, fps, bitrate, in_fmt, stride_bytes);
+}
+
+/* dst_w/dst_h of 0 mean "same as the source", i.e. no scaling. The VE keeps
+ * input and destination geometry as separate fields, so a non-zero dst asks
+ * the hardware to scale during encode - which is what GameStream needs: the
+ * client negotiates a resolution and rejects a stream that is not exactly it. */
+rgsp_capture *rgsp_capture_open_scaled_ex(int width, int height,
+                                          int dst_w, int dst_h,
+                                          int fps, int bitrate,
+                                          int in_fmt, int stride_bytes)
 {
     g_last_error[0] = '\0';
 
@@ -722,7 +755,8 @@ rgsp_capture *rgsp_capture_open_ex(int width, int height, int fps, int bitrate,
      * stream is undecodable without hardcoding them per resolution. */
     bcfg.bEncH264Nalu = 1;
     bcfg.nInputWidth = w; bcfg.nInputHeight = h;
-    bcfg.nDstWidth   = w; bcfg.nDstHeight   = h;
+    bcfg.nDstWidth   = dst_w > 0 ? (unsigned)dst_w : w;
+    bcfg.nDstHeight  = dst_h > 0 ? (unsigned)dst_h : h;
     bcfg.nStride     = stride_bytes ? pitch : w;
     bcfg.eInputFormat = (VENC_PIXEL_FMT)in_fmt;
     bcfg.memops = c->memops; bcfg.veOpsS = veops; bcfg.pVeOpsSelf = NULL;
@@ -739,8 +773,32 @@ rgsp_capture *rgsp_capture_open_ex(int width, int height, int fps, int bitrate,
     if (p_AllocInputBuffer(c->enc, &bp) != 0) { set_error("AllocInputBuffer failed"); goto fail; }
     c->buffers_alloced = 1;
 
-    LOG("encoder ready: %ux%u fmt=%d (%s) stride=%u -> H.264 @ %d fps",
-        w, h, in_fmt, c->rgb_in ? "RGB passthrough" : "NV12 via CPU convert",
+    /* The VE defaults to an IDR every 25 frames. At 60 fps that is a ~55 KB
+     * burst every 0.4 s, which is the single largest thing this stream asks
+     * of the handheld's WiFi and the reason the picture stalls: lose one
+     * packet of a keyframe and the client discards the whole frame.
+     *
+     * GameStream does not need periodic keyframes - the client asks for one
+     * (RequestIdrFrame) whenever it needs to recover, which is already wired
+     * to VENC_IndexParamForceKeyFrame. So push the automatic interval far out
+     * and let the client drive it.
+     *
+     * Index 2 is reconstructed from the same enum as ForceKeyFrame (6) and
+     * Bitrate (0), both confirmed by behaviour; this one is confirmed the same
+     * way, by watching the keyframe cadence change. A failure here is not
+     * fatal - it just means the default cadence stays. */
+    {
+        int interval = fps > 0 ? fps * 60 : 1800;
+        int r = p_VideoEncSetParameter(c->enc, VENC_IndexParamMaxKeyInterval, &interval);
+        if (r != 0)
+            LOG("warning: could not set key-frame interval (rc=%d); keeping the encoder default", r);
+        else
+            LOG("key-frame interval set to %d frames (client-driven IDR)", interval);
+    }
+
+    LOG("encoder ready: %ux%u -> %ux%u fmt=%d (%s) stride=%u -> H.264 @ %d fps",
+        w, h, bcfg.nDstWidth, bcfg.nDstHeight, in_fmt,
+        c->rgb_in ? "RGB passthrough" : "NV12 via CPU convert",
         bcfg.nStride, fps);
 
     /* SPS/PPS is fetched after the first frame is encoded — see fetch_sps_pps()
@@ -770,6 +828,14 @@ rgsp_capture *rgsp_capture_open(int width, int height, int fps, int bitrate)
      * is B,G,R,A — exactly /dev/fb0. Verified against the CPU conversion path
      * at 42.2 dB PSNR on identical screen content. */
     return rgsp_capture_open_ex(width, height, fps, bitrate, VENC_PIXEL_ARGB, 0);
+}
+
+rgsp_capture *rgsp_capture_open_scaled(int width, int height,
+                                       int dst_w, int dst_h,
+                                       int fps, int bitrate)
+{
+    return rgsp_capture_open_scaled_ex(width, height, dst_w, dst_h, fps, bitrate,
+                                       VENC_PIXEL_ARGB, 0);
 }
 
 int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
@@ -866,6 +932,9 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
             LOG("warning: no SPS/PPS - the stream will not decode standalone");
         c->sps_pps_fetched = 1;
     }
+    /* Frame 0 gets its parameter sets up front; every later keyframe gets
+     * them too, but only once the drain below has told us it IS a keyframe -
+     * see the prepend after the loop. */
     if (c->frames == 0 && c->sps_pps_len &&
         out_append(c, c->sps_pps, c->sps_pps_len) != 0)
         return capture_fail(c);
@@ -936,9 +1005,25 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
 
     c->frames++;
 
+    /* A client-requested IDR arrives from the VE as a bare type-5 NAL with no
+     * SPS/PPS ahead of it - only the very first frame carries them. A software
+     * decoder reuses the parameter sets it already cached and does not care,
+     * which is why this went unnoticed against FFmpeg. A hardware decoder
+     * builds its format description from the parameter sets carried with the
+     * keyframe: VideoToolbox (every Apple client, including Moonlight on the
+     * Apple TV) never starts decoding, sits in "Waiting for IDR frame" and
+     * drops the connection. Repeat the sets ahead of every keyframe. */
+    int keyframe = annexb_first_slice_is_idr(c->out_buf, c->out_len);
+    if (keyframe && c->sps_pps_len && !annexb_starts_with_parameter_sets(c->out_buf, c->out_len)) {
+        if (out_reserve(c, c->sps_pps_len) != 0) return capture_fail(c);
+        memmove(c->out_buf + c->sps_pps_len, c->out_buf, c->out_len);
+        memcpy(c->out_buf, c->sps_pps, c->sps_pps_len);
+        c->out_len += c->sps_pps_len;
+    }
+
     if (data)        *data = c->out_buf;
     if (len)         *len  = c->out_len;
-    if (is_keyframe) *is_keyframe = annexb_first_slice_is_idr(c->out_buf, c->out_len);
+    if (is_keyframe) *is_keyframe = keyframe;
     return 0;
 }
 

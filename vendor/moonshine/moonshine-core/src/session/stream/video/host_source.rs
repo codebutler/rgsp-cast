@@ -86,7 +86,19 @@ pub(crate) fn spawn_packetize_frames(
 		start.notified().await;
 
 		let mut packetizer = Packetizer::new(context.encrypt_video, keys_rx);
-		packetizer.warm_up(config.fec_percentage, context.minimum_fec_packets);
+		// Bound the warm-up to the shard counts this host actually produces.
+		// The full MAX_SHARDS sweep takes ~14s on this CPU and runs *after*
+		// `start.notified()`, i.e. once the client is already waiting for
+		// video - Moonlight times out with "no video received from host"
+		// before the first frame is ever packetized. 720x480 frames measured
+		// on device are 1-3 KB, so 64 data shards is far above what we emit;
+		// anything larger builds on demand and logs a trace line.
+		const WARM_UP_MAX_DATA_SHARDS: usize = 64;
+		packetizer.warm_up(
+			config.fec_percentage,
+			context.minimum_fec_packets,
+			WARM_UP_MAX_DATA_SHARDS,
+		);
 		let mut sequence_number: u32 = 0;
 
 		// Trigger session shutdown if we exit unexpectedly.

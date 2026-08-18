@@ -161,9 +161,17 @@ impl Packetizer {
 
 	/// Pre-create FEC encoders for all possible block sizes to avoid
 	/// expensive ReedSolomon matrix construction during frame processing.
-	pub fn warm_up(&mut self, fec_percentage: u8, minimum_fec_packets: u32) {
+	///
+	/// `max_data_shards` bounds how far up the shard-count range to pre-build.
+	/// ReedSolomon construction cost climbs steeply with the data-shard count -
+	/// measured on this device it is tens of microseconds below ~32 shards but
+	/// ~250ms near 213, so warming the full MAX_SHARDS range costs ~14 seconds
+	/// and starves the packetize loop for the entire time. Frames larger than
+	/// the cap still work; they build their encoder on demand and log the
+	/// "creating a new one" trace, which is how you find out the cap is too low.
+	pub fn warm_up(&mut self, fec_percentage: u8, minimum_fec_packets: u32, max_data_shards: usize) {
 		let nr_parity_shards_per_block = MAX_SHARDS * fec_percentage as usize / (100 + fec_percentage as usize);
-		let nr_data_shards_per_block = MAX_SHARDS - nr_parity_shards_per_block;
+		let nr_data_shards_per_block = (MAX_SHARDS - nr_parity_shards_per_block).min(max_data_shards);
 
 		for nr_data_shards in 1..=nr_data_shards_per_block {
 			let nr_parity_shards = (nr_data_shards * fec_percentage as usize / 100)

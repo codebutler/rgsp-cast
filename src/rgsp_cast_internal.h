@@ -16,6 +16,12 @@
 rgsp_capture *rgsp_capture_open_ex(int width, int height, int fps, int bitrate,
                                    int in_fmt, int stride_bytes);
 
+/* As above, plus VE-side scaling: dst_w/dst_h of 0 mean "same as source". */
+rgsp_capture *rgsp_capture_open_scaled_ex(int width, int height,
+                                          int dst_w, int dst_h,
+                                          int fps, int bitrate,
+                                          int in_fmt, int stride_bytes);
+
 void rgsp_capture_set_verbose(int v);
 
 /* The Annex-B SPS+PPS captured after the first encoded frame, or NULL. */

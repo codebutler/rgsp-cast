@@ -3,6 +3,7 @@ use anyhow::{anyhow, Result};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// GameStream video runs on a 90 kHz RTP clock.
 const RTP_CLOCK_HZ: u64 = 90_000;
@@ -12,6 +13,11 @@ const RTP_CLOCK_HZ: u64 = 90_000;
 /// an unexercised path). Moonlight clients routinely negotiate 1280x720, so
 /// the panel geometry — not the negotiated resolution — is what `Capture`
 /// actually opens with.
+/// Ceiling for the encoder bitrate, regardless of what the client negotiates.
+/// 6 Mbps is already generous for 720x480 content and keeps keyframes small
+/// enough to survive the handheld's WiFi.
+pub const BITRATE_CEILING: u32 = 6_000_000;
+
 pub const PANEL_WIDTH: u32 = 720;
 pub const PANEL_HEIGHT: u32 = 480;
 
@@ -125,12 +131,40 @@ impl VideoStream {
     /// `moonshine_core::session::manager::SessionManager::video_frame_sender()`,
     /// which is not called from this task's files (see module docs).
     ///
-    /// The clamp to the panel's fixed 720x480 geometry happens here, at the
-    /// `Capture::open` call: `self.cfg.width`/`height` (the negotiated
-    /// Moonlight resolution) are intentionally not passed through.
+    /// The panel is always 720x480, but the stream must come out at the
+    /// resolution the client negotiated: a GameStream client rejects every
+    /// frame of a differently-sized stream, sits in "Waiting for IDR frame"
+    /// and drops the connection - verified against moonlight-qt, where the
+    /// same host and binary streams fine at 720x480 and fails at 1080p.
+    /// The VE scales input->destination in hardware, so the capture stays at
+    /// panel geometry and the encoder emits the negotiated size.
     pub fn run(self, mut send: impl FnMut(EncodedFrameRef<'_>) -> Result<()>) -> Result<()> {
-        let mut capture = Capture::open(PANEL_WIDTH, PANEL_HEIGHT, self.cfg.fps, self.cfg.bitrate)
-            .map_err(|e| anyhow!("Capture::open: {e}"))?;
+        // Moonlight asks for a bitrate sized to the resolution it negotiated -
+        // 20 Mbps at 1080p by default. The actual picture is a 720x480 panel
+        // upscaled, so there is no detail above roughly SD to spend those bits
+        // on: all a higher ceiling buys is enormous keyframes that this
+        // device's WiFi then drops, which is what makes the stream freeze.
+        // Cap it at a rate generous for the real source resolution.
+        let bitrate = self.cfg.bitrate.min(BITRATE_CEILING);
+        if bitrate != self.cfg.bitrate {
+            tracing::info!(
+                "requested {} bps capped to {} bps for a {}x{} source",
+                self.cfg.bitrate,
+                bitrate,
+                PANEL_WIDTH,
+                PANEL_HEIGHT,
+            );
+        }
+
+        let mut capture = Capture::open_scaled(
+            PANEL_WIDTH,
+            PANEL_HEIGHT,
+            self.cfg.width,
+            self.cfg.height,
+            self.cfg.fps,
+            bitrate,
+        )
+        .map_err(|e| anyhow!("Capture::open: {e}"))?;
 
         // The handheld's own status pill can't show a cast indicator during
         // gameplay without patching minarch into `.system/`, so the marker
@@ -139,27 +173,54 @@ impl VideoStream {
 
         if (self.cfg.width, self.cfg.height) != (PANEL_WIDTH, PANEL_HEIGHT) {
             tracing::info!(
-                "negotiated resolution {}x{} clamped to panel geometry {}x{}",
-                self.cfg.width,
-                self.cfg.height,
+                "panel {}x{} scaled by the VE to the negotiated {}x{}",
                 PANEL_WIDTH,
                 PANEL_HEIGHT,
+                self.cfg.width,
+                self.cfg.height,
             );
         }
 
         let mut frame_number: u64 = 0;
 
+        // A keyframe at the negotiated resolution is one to two orders of
+        // magnitude larger than a P-frame (measured: 85 KB / 75 packets at
+        // 1080p versus ~2 KB). A client that loses any one of those packets
+        // asks for another IDR, which is just as likely to lose a packet, so
+        // honouring every request turns one dropped packet into a permanent
+        // storm of huge frames and the picture freezes. Coalesce: at most one
+        // forced IDR per interval, and let the requests in between fall on the
+        // floor - the client re-asks anyway if it still needs one.
+        const MIN_IDR_INTERVAL: Duration = Duration::from_millis(750);
+        let mut last_idr = Instant::now() - MIN_IDR_INTERVAL;
+
         loop {
             if self.reset.swap(false, Ordering::Relaxed) {
+                // A reset is a new session, not loss recovery: always honour it.
                 frame_number = 0;
                 capture.request_idr();
+                last_idr = Instant::now();
             } else if self.idr.swap(false, Ordering::Relaxed) {
-                capture.request_idr();
+                if last_idr.elapsed() >= MIN_IDR_INTERVAL {
+                    capture.request_idr();
+                    last_idr = Instant::now();
+                } else {
+                    tracing::trace!("IDR request coalesced");
+                }
             }
 
             // A failure from `Capture::next` is terminal: the capture is
             // dead and must simply be dropped, not retried.
             let frame = capture.next()?;
+
+            // Frame numbers on the wire are 1-based. Upstream moonshine's
+            // pipeline increments before use (pipeline/mod.rs:307 then :322),
+            // and the client half treats index 0 as "no frame yet" - see the
+            // `first.max(1) - 1` display-order mapping. Sending a frame 0
+            // means the client never accepts the first IDR, so the decoder
+            // is never initialised and no picture is ever shown, even though
+            // packets keep arriving and it keeps asking for another IDR.
+            frame_number += 1;
             let rtp_timestamp = rtp_timestamp_for(frame_number, self.cfg.fps);
 
             send(EncodedFrameRef {
@@ -168,8 +229,6 @@ impl VideoStream {
                 frame_number: frame_number as u32,
                 rtp_timestamp,
             })?;
-
-            frame_number += 1;
         }
     }
 }

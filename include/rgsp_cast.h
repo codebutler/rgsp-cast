@@ -19,6 +19,14 @@ typedef struct rgsp_capture rgsp_capture;
  * call rgsp_capture_last_error() for detail. */
 rgsp_capture *rgsp_capture_open(int width, int height, int fps, int bitrate);
 
+/* Capture the panel but encode at dst_w x dst_h, scaled by the VE.
+ * GameStream clients reject a stream whose resolution is not the one they
+ * negotiated, so the host encodes at the negotiated size rather than the
+ * panel's. dst_w/dst_h of 0 mean "no scaling". */
+rgsp_capture *rgsp_capture_open_scaled(int width, int height,
+                                       int dst_w, int dst_h,
+                                       int fps, int bitrate);
+
 /* Blocks until the next frame is due, captures, encodes, and returns the
  * Annex-B bitstream. Returns 0 on success, -1 on failure.
  * The first frame is always a keyframe (SPS + PPS + IDR).

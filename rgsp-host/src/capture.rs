@@ -8,6 +8,15 @@ struct RgspCapture {
 }
 
 extern "C" {
+    fn rgsp_capture_open_scaled(
+        width: c_int,
+        height: c_int,
+        dst_w: c_int,
+        dst_h: c_int,
+        fps: c_int,
+        bitrate: c_int,
+    ) -> *mut RgspCapture;
+    #[allow(dead_code)]
     fn rgsp_capture_open(width: c_int, height: c_int, fps: c_int, bitrate: c_int)
         -> *mut RgspCapture;
     fn rgsp_capture_next(
@@ -59,6 +68,23 @@ unsafe impl Send for Capture {}
 
 impl Capture {
     pub fn open(width: u32, height: u32, fps: u32, bitrate: u32) -> Result<Capture> {
+        Self::open_scaled(width, height, 0, 0, fps, bitrate)
+    }
+
+    /// Capture at `width`x`height` but encode at `dst_w`x`dst_h`, scaled by the
+    /// VE. A GameStream client rejects any stream whose resolution is not the
+    /// one it negotiated - it never assembles a frame, sits in "Waiting for IDR
+    /// frame" and eventually drops the connection - so the host must encode at
+    /// the negotiated size even though the panel is 720x480. Pass 0 for no
+    /// scaling.
+    pub fn open_scaled(
+        width: u32,
+        height: u32,
+        dst_w: u32,
+        dst_h: u32,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<Capture> {
         // Claim the single capture slot.
         if CAPTURE_OPEN
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -68,7 +94,14 @@ impl Capture {
         }
 
         let handle = unsafe {
-            rgsp_capture_open(width as c_int, height as c_int, fps as c_int, bitrate as c_int)
+            rgsp_capture_open_scaled(
+                width as c_int,
+                height as c_int,
+                dst_w as c_int,
+                dst_h as c_int,
+                fps as c_int,
+                bitrate as c_int,
+            )
         };
         if handle.is_null() {
             // C open failed; release the slot before returning the error.

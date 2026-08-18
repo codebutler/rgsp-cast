@@ -330,11 +330,24 @@ async fn session_pump(
             fps,
         });
         tracing::info!(
-            "session started: {}x{} @ {fps} fps, {} bps requested",
+            "session started: {}x{} @ {fps} fps, {} bps requested, codec {:?}",
             context.width,
             context.height,
             context.bitrate,
+            context.video_format,
         );
+        // We only ever produce H.264: the Cedar VE's H.265 path is not wired
+        // up here. A client that negotiated anything else will sit in
+        // "Waiting for IDR frame" forever, because its depacketizer looks for
+        // that codec's parameter sets (an HEVC VPS, say) and never finds them
+        // in our stream - with no error anywhere, on either side.
+        if !matches!(context.video_format, moonshine_core::session::stream::video::VideoFormat::H264) {
+            tracing::error!(
+                "client negotiated {:?}, but this host only encodes H.264 - the client will \
+                 never decode this stream. Set the client's video codec to H.264.",
+                context.video_format,
+            );
+        }
 
         let video = VideoStream::new(VideoConfig {
             width: context.width,
