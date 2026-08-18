@@ -4,19 +4,24 @@
  * against a plain synthetic buffer with no device involved.
  *
  * What this test CAN show: the library doesn't crash or fail with the
- * overlay on, and the encoded output measurably changes when the overlay is
- * turned on (`with != without`), which a static square painted into every
- * captured frame should reliably do.
+ * overlay on, and turning it on measurably changes the encoded size of an
+ * otherwise-ordinary P-frame (`with != without`), which a static square
+ * painted into every captured frame should reliably do. The two compared
+ * frames are both plain P-frames captured back to back with nothing else
+ * intentionally different between them (see the IDR discard below), so the
+ * size delta is attributable to the overlay and not to encoder frame-type
+ * structure.
  *
  * What this test CANNOT show: that the marker is the right color, the right
  * size, in the right place, or that surrounding pixels are undisturbed - an
  * H.264 byte count changing is consistent with a correct 16x16 red square,
- * but also with almost any other change to the frame. Pixel-level
- * correctness is what tests/test_draw_marker.c proves, on the host, by
- * reading the ION-equivalent buffer directly before it goes to the encoder.
- * This test is only a wiring check that draw_marker() is actually being
- * called from rgsp_capture_next() and that overlay=1 reaches the real
- * device's encoder without failing.
+ * but also with almost any other change to the frame (it remains a size
+ * heuristic, not a pixel check). Pixel-level correctness is what
+ * tests/test_draw_marker.c proves, on the host, by reading the
+ * ION-equivalent buffer directly before it goes to the encoder. This test is
+ * only a wiring check that draw_marker() is actually being called from
+ * rgsp_capture_next() and that overlay=1 reaches the real device's encoder
+ * without failing.
  *
  * The marker is composited into the captured copy, never into the framebuffer
  * itself - the device's own display must be unchanged. (Not automatically
@@ -34,6 +39,18 @@ int main(void)
 
     const unsigned char *data; size_t len; int key;
 
+    /* include/rgsp_cast.h: "The first frame is always a keyframe (SPS + PPS
+     * + IDR)." That frame is structurally larger than any P-frame for
+     * reasons that have nothing to do with the overlay, so it must not be
+     * either side of the size comparison below - discard it here. */
+    if (rgsp_capture_next(c, &data, &len, &key) != 0) {
+        fprintf(stderr, "next (discard IDR): %s\n", rgsp_capture_last_error());
+        return 1;
+    }
+
+    /* Both frames compared below are ordinary P-frames captured back to
+     * back, differing (as far as this test controls) only in the overlay
+     * flag - so a size difference is attributable to the overlay. */
     rgsp_capture_set_overlay(c, 0);
     if (rgsp_capture_next(c, &data, &len, &key) != 0) {
         fprintf(stderr, "next (overlay off): %s\n", rgsp_capture_last_error());
@@ -42,12 +59,6 @@ int main(void)
     size_t without = len;
 
     rgsp_capture_set_overlay(c, 1);
-    /* First frame with overlay on can still carry SPS/PPS sized for the
-     * pre-overlay stream; take the second to compare like with like. */
-    if (rgsp_capture_next(c, &data, &len, &key) != 0) {
-        fprintf(stderr, "next (overlay on, warmup): %s\n", rgsp_capture_last_error());
-        return 1;
-    }
     if (rgsp_capture_next(c, &data, &len, &key) != 0) {
         fprintf(stderr, "next (overlay on): %s\n", rgsp_capture_last_error());
         return 1;

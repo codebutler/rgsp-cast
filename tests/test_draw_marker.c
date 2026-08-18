@@ -14,6 +14,13 @@
  * this: only reading the actual pixels the function wrote can show the
  * marker exists, is the right color, is the right size, is in the right
  * place, and touches nothing else.
+ *
+ * Runs check() twice, at two different strides: draw_marker()'s own doc
+ * comment warns callers never to assume stride == width*4, so a test that
+ * only ever used width*4 as the stride could not catch a regression back to
+ * that exact assumption. The second pass pads every row so a hardcoded
+ * width*4 inside draw_marker would write into the wrong row and get caught
+ * by the same border checks.
  */
 #include "../src/rgsp-cast.c"
 
@@ -22,7 +29,6 @@
 
 #define W 720
 #define H 480
-#define STRIDE (W * 4)
 #define GUARD 256
 
 /* Sentinel is 0xAA, not 0x00: a zero fill can't distinguish "drew nothing"
@@ -31,8 +37,9 @@
  */
 #define SENTINEL 0xAA
 
-static unsigned char *frame;      /* W*H*4, plus a trailing guard region */
-static size_t frame_bytes;
+static unsigned char *frame;
+static size_t frame_bytes;      /* (size_t)stride * H, for the active run */
+static int g_stride;
 
 static void arm(void)
 {
@@ -42,18 +49,19 @@ static void arm(void)
 static int pixel_is(int x, int y, unsigned char b, unsigned char g,
                     unsigned char r, unsigned char a)
 {
-    unsigned char *px = frame + (size_t)y * STRIDE + (size_t)x * 4;
+    unsigned char *px = frame + (size_t)y * g_stride + (size_t)x * 4;
     return px[0] == b && px[1] == g && px[2] == r && px[3] == a;
 }
 
 static int pixel_is_sentinel(int x, int y)
 {
-    unsigned char *px = frame + (size_t)y * STRIDE + (size_t)x * 4;
+    unsigned char *px = frame + (size_t)y * g_stride + (size_t)x * 4;
     return px[0] == SENTINEL && px[1] == SENTINEL &&
            px[2] == SENTINEL && px[3] == SENTINEL;
 }
 
-/* Checks every property the task requires. Returns 1 if all hold. */
+/* Checks every property the task requires against whatever draw_marker()
+ * left in `frame` at the current g_stride. Returns 1 if all hold. */
 static int check(const char *label)
 {
     int ok = 1;
@@ -70,7 +78,10 @@ static int check(const char *label)
     }
 
     /* Pixels immediately bordering all four edges are untouched - catches an
-     * off-by-one in the loop bounds in either direction. */
+     * off-by-one in the loop bounds in either direction. This is the group
+     * that a colour-only bug (e.g. swapped channel bytes) does NOT exercise:
+     * it needs a bounds bug to fire, which is why the fault-injection report
+     * covers it with a second, separate injection. */
     for (int x = 16; x < 32; x++) {
         if (!pixel_is_sentinel(x, 15)) { printf("  [%s] FAIL: (%d,15) above the rect was touched\n", label, x); ok = 0; }
         if (!pixel_is_sentinel(x, 32)) { printf("  [%s] FAIL: (%d,32) below the rect was touched\n", label, x); ok = 0; }
@@ -95,17 +106,34 @@ static int check(const char *label)
     return ok;
 }
 
-int main(void)
+/* Allocates a fresh W x H buffer at the given stride, arms it, draws, checks,
+ * and frees it. Returns check()'s result. */
+static int run(const char *label, int stride)
 {
-    frame_bytes = (size_t)STRIDE * H;
+    g_stride = stride;
+    frame_bytes = (size_t)stride * H;
     frame = malloc(frame_bytes + GUARD);
-    if (!frame) { fprintf(stderr, "out of memory\n"); return 1; }
+    if (!frame) { fprintf(stderr, "out of memory\n"); return 0; }
 
     arm();
-    draw_marker(frame, W, H, STRIDE);
-    int normal_ok = check("normal");
+    draw_marker(frame, W, H, stride);
+    int ok = check(label);
 
-    if (!normal_ok) {
+    free(frame);
+    frame = NULL;
+    return ok;
+}
+
+int main(void)
+{
+    int ok = 1;
+
+    ok &= run("stride=width*4",   W * 4);
+    /* Padded stride: catches a hardcoded width*4 inside draw_marker, exactly
+     * the assumption its own doc comment warns callers not to make. */
+    ok &= run("stride=width*4+64", W * 4 + 64);
+
+    if (!ok) {
         printf("FAIL: draw_marker did not produce the expected result under "
                "its real implementation.\n");
         return 1;
