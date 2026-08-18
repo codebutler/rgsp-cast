@@ -117,6 +117,15 @@ monitor: deploy
 
 PAKDIR = dist/Tools/h700/Cast.pak
 
+# Built out-of-tree against the BSP kernel, not by this Makefile: it needs an
+# arm64 container and a 4.9 source tree, and the result is committed-adjacent
+# but gitignored. Fail with a useful pointer rather than make's "No rule to
+# make target".
+bin/snd-aloop.ko:
+	@echo "bin/snd-aloop.ko is missing - build it once with:" >&2
+	@echo "    ./scripts/build-snd-aloop.sh" >&2
+	@false
+
 # NOTE: no libopus-dev here. With it present, audiopus_sys links Opus
 # dynamically against the container's libopus.so.0 - the device has no
 # libopus, so the binary dies at startup with "cannot open shared object
@@ -130,15 +139,6 @@ PAKDIR = dist/Tools/h700/Cast.pak
 # reusing that cache fails to link ("cannot find -lopus") until audiopus_sys
 # is rebuilt from scratch. Forcing just that one crate is far cheaper than
 # wiping all of target/release (moonshine-core, tokio, etc. stay cached).
-# Built out-of-tree against the BSP kernel, not by this Makefile: it needs an
-# arm64 container and a 4.9 source tree, and the result is committed-adjacent
-# but gitignored. Fail with a useful pointer rather than make's "No rule to
-# make target".
-bin/snd-aloop.ko:
-	@echo "bin/snd-aloop.ko is missing - build it once with:" >&2
-	@echo "    ./scripts/build-snd-aloop.sh" >&2
-	@false
-
 .PHONY: pak
 pak: librgspcast.a bin/snd-aloop.ko
 	@mkdir -p $(PAKDIR)/lib/h700
