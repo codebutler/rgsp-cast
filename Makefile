@@ -55,6 +55,21 @@ bin/test-idr-cadence: tests/test_idr_cadence.c librgspcast.a
 		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
 		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
 
+# Includes src/rgsp-cast.c directly to reach the static draw_marker(), same
+# reason as test-vendor-overspill above. Runs entirely on the host - no
+# device, ION, or vendor libs involved.
+bin/test-draw-marker: tests/test_draw_marker.c src/rgsp-cast.c
+	@mkdir -p bin
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
+		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
+		       gcc $(CFLAGS) -o $@ $< -ldl'
+
+bin/test-overlay: tests/test_overlay.c librgspcast.a
+	@mkdir -p bin
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
+		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
+		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
+
 bin/rgsp-audio-pump: src/rgsp-audio-pump.c
 	@mkdir -p bin
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
@@ -115,6 +130,15 @@ PAKDIR = dist/Tools/h700/Cast.pak
 # reusing that cache fails to link ("cannot find -lopus") until audiopus_sys
 # is rebuilt from scratch. Forcing just that one crate is far cheaper than
 # wiping all of target/release (moonshine-core, tokio, etc. stay cached).
+# Built out-of-tree against the BSP kernel, not by this Makefile: it needs an
+# arm64 container and a 4.9 source tree, and the result is committed-adjacent
+# but gitignored. Fail with a useful pointer rather than make's "No rule to
+# make target".
+bin/snd-aloop.ko:
+	@echo "bin/snd-aloop.ko is missing - build it once with:" >&2
+	@echo "    ./scripts/build-snd-aloop.sh" >&2
+	@false
+
 .PHONY: pak
 pak: librgspcast.a bin/snd-aloop.ko
 	@mkdir -p $(PAKDIR)/lib/h700
