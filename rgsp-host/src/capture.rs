@@ -17,6 +17,7 @@ extern "C" {
         is_keyframe: *mut c_int,
     ) -> c_int;
     fn rgsp_capture_request_idr(c: *mut RgspCapture);
+    fn rgsp_capture_set_overlay(c: *mut RgspCapture, enabled: c_int);
     fn rgsp_capture_close(c: *mut RgspCapture);
     fn rgsp_capture_last_error() -> *const c_char;
 }
@@ -109,6 +110,14 @@ impl Capture {
 
     pub fn request_idr(&self) {
         unsafe { rgsp_capture_request_idr(self.handle) }
+    }
+
+    /// Composites a small "live" marker into captured frames so the
+    /// receiving client can see the stream is live. The device's own
+    /// display is never touched - see rgsp_capture_set_overlay's doc
+    /// comment in include/rgsp_cast.h.
+    pub fn set_overlay(&self, enabled: bool) {
+        unsafe { rgsp_capture_set_overlay(self.handle, enabled as c_int) }
     }
 }
 

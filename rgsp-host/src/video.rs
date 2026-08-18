@@ -132,6 +132,11 @@ impl VideoStream {
         let mut capture = Capture::open(PANEL_WIDTH, PANEL_HEIGHT, self.cfg.fps, self.cfg.bitrate)
             .map_err(|e| anyhow!("Capture::open: {e}"))?;
 
+        // The handheld's own status pill can't show a cast indicator during
+        // gameplay without patching minarch into `.system/`, so the marker
+        // goes into the outgoing stream instead: only the TV sees it.
+        capture.set_overlay(true);
+
         if (self.cfg.width, self.cfg.height) != (PANEL_WIDTH, PANEL_HEIGHT) {
             tracing::info!(
                 "negotiated resolution {}x{} clamped to panel geometry {}x{}",

@@ -326,6 +326,37 @@ static void rgb565_to_nv12(const uint8_t *src, unsigned pitch,
 #undef B565
 }
 
+/* ── overlay ─────────────────────────────────────────────────────────────── */
+
+/* Paints a 16x16 opaque red square at (16,16) into a BGRA buffer, in place.
+ * Pure and format-specific: it assumes 4 bytes/pixel B,G,R,A, which is what
+ * the RGB-passthrough capture path (rgsp_capture_open's default) puts in the
+ * ION input buffer - see the comment at rgsp_capture_open() for why that
+ * layout matches /dev/fb0 directly. Not meaningful against the NV12 debug
+ * path's Y/UV planes, so callers only invoke it when c->rgb_in.
+ *
+ * `stride` must be the real row pitch in bytes (VencInputBuffer's rows are
+ * copied straight from the framebuffer via pread+memcpy with no repacking,
+ * so they inherit /dev/fb0's pitch, which can exceed width*4) - never pass
+ * width*4 unless it has been verified equal to the buffer's actual stride.
+ *
+ * width/height gate the square against buffers too small to hold it, so a
+ * caller can never be handed a resolution where this writes out of bounds. */
+static void draw_marker(unsigned char *buf, int width, int height, int stride)
+{
+    if (width < 32 || height < 32) return;
+    for (int y = 16; y < 32; y++) {
+        unsigned char *row = buf + (size_t)y * stride;
+        for (int x = 16; x < 32; x++) {
+            unsigned char *px = row + (size_t)x * 4;
+            px[0] = 0x00;  /* B */
+            px[1] = 0x00;  /* G */
+            px[2] = 0xFF;  /* R */
+            px[3] = 0xFF;  /* A */
+        }
+    }
+}
+
 /* ── misc ────────────────────────────────────────────────────────────────── */
 
 static long long now_ns(void)
@@ -367,6 +398,10 @@ struct rgsp_capture {
     int       force_idr;
     int       short_reads;
     long long convert_ns, encode_ns;
+
+    /* Whether to composite the live marker (see draw_marker()). Off by
+     * default (calloc'd). Same threading contract as force_idr above. */
+    int       overlay;
 
     /* Sticky death flag. A failed next() can leave the vendor input buffer
      * un-acquired or already submitted, so the object is not safe to drive
@@ -790,6 +825,12 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
     long long t1 = now_ns();
     c->convert_ns += t1 - t0;
 
+    /* Composite into the ION copy just made above, never into /dev/fb0 - the
+     * device's own screen must stay untouched. Only meaningful for the BGRA
+     * passthrough path; see draw_marker()'s comment. */
+    if (c->overlay && c->rgb_in)
+        draw_marker(c->inbuf._virY, (int)c->w, (int)c->h, (int)c->pitch);
+
     c->inbuf.nPts          = (long long)c->frames * (1000000LL / c->fps);
     c->inbuf.bIsFirstFrame = (c->frames == 0);
 
@@ -904,6 +945,11 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
 void rgsp_capture_request_idr(rgsp_capture *c)
 {
     if (c) c->force_idr = 1;
+}
+
+void rgsp_capture_set_overlay(rgsp_capture *c, int enabled)
+{
+    if (c) c->overlay = enabled ? 1 : 0;
 }
 
 const unsigned char *rgsp_capture_param_sets(rgsp_capture *c, size_t *len)
