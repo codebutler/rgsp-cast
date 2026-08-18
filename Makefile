@@ -100,5 +100,35 @@ monitor: deploy
 	ssh $(DEVICE) 'cd $(DESTDIR) && sh monitor.sh $(SECS) $(DESTDIR)/mon.log'
 	scp -q $(DEVICE):$(DESTDIR)/mon.log .
 
+PAKDIR = dist/Tools/h700/Cast.pak
+
+# NOTE: no libopus-dev here. With it present, audiopus_sys links Opus
+# dynamically against the container's libopus.so.0 - the device has no
+# libopus, so the binary dies at startup with "cannot open shared object
+# file: libopus.so.0". Without libopus-dev, audiopus_sys can't find it via
+# pkg-config and instead builds Opus from source (needs cmake) and links it
+# statically, which is what the device needs.
+#
+# The `cargo clean --release -p audiopus_sys` is required even so: a target/release
+# populated by an earlier build *with* libopus-dev leaves cached artifacts
+# that were compiled against the dynamic lib. Once libopus-dev is absent,
+# reusing that cache fails to link ("cannot find -lopus") until audiopus_sys
+# is rebuilt from scratch. Forcing just that one crate is far cheaper than
+# wiping all of target/release (moonshine-core, tokio, etc. stay cached).
+.PHONY: pak
+pak: librgspcast.a bin/snd-aloop.ko
+	@mkdir -p $(PAKDIR)/lib/h700
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w rust:1-bookworm \
+		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev pkg-config >/dev/null 2>&1 && \
+		       cargo clean --release -p audiopus_sys && \
+		       cargo build --workspace --release'
+	cp target/release/rgsp-host $(PAKDIR)/
+	cp pak/launch.sh pak/pak.json pak/cast.png $(PAKDIR)/
+	cp bin/snd-aloop.ko $(PAKDIR)/
+	cp -r pak/hooks $(PAKDIR)/
+	chmod +x $(PAKDIR)/launch.sh $(PAKDIR)/rgsp-host $(PAKDIR)/hooks/*/*.sh
+	@echo "-> $(PAKDIR)"
+	@echo "   lib/h700 is populated on the device at install time"
+
 clean:
 	rm -rf bin librgspcast.a
