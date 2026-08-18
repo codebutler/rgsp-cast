@@ -2324,9 +2324,7 @@ Move the References tables from the end of this plan into the README's `## Credi
 ```bash
 ./tests/test_launch_sh.sh
 ./tests/test_hooks.sh
-docker run --rm --platform linux/arm64 -v "$PWD":/w -w /w rust:1-bookworm \
-  sh -c 'apt-get update -qq && apt-get install -y -qq libasound2-dev libopus-dev pkg-config >/dev/null 2>&1 && \
-         cargo test --workspace'
+make test-rust
 ```
 
 Expected: all PASS (device-only tests skip cleanly off-device).

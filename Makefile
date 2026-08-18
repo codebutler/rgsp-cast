@@ -139,6 +139,20 @@ bin/snd-aloop.ko:
 # reusing that cache fails to link ("cannot find -lopus") until audiopus_sys
 # is rebuilt from scratch. Forcing just that one crate is far cheaper than
 # wiping all of target/release (moonshine-core, tokio, etc. stay cached).
+# Run the Rust suite in the same arm64 container the pak is built in.
+#
+# The `cargo clean -p audiopus_sys` matters here for the same reason it does in
+# `pak`, but for the *debug* profile: `cargo clean --release -p ...` below only
+# touches target/release, so a target/debug populated by an earlier build that
+# had libopus-dev present still carries the dynamic-opus link and every test
+# binary fails with "cannot find -lopus". Deliberately no libopus-dev in the
+# package list, so the tests link the way the shipped binary does.
+.PHONY: test-rust
+test-rust:
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w rust:1-bookworm \
+		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev pkg-config >/dev/null 2>&1 && \
+		       cargo clean -p audiopus_sys && cargo test --workspace'
+
 .PHONY: pak
 pak: librgspcast.a bin/snd-aloop.ko
 	@mkdir -p $(PAKDIR)/lib/h700
