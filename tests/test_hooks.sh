@@ -232,7 +232,6 @@ fi
 echo "=== Testing boot hook does not remove live daemon's .asoundrc ==="
 TESTDIR6_LIVE="$TEST_ROOT/boot-live"
 mkdir -p "$TESTDIR5"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5'" EXIT
 export RGSP_RUN_DIR="$TESTDIR5"
 export USERDATA_PATH="$TESTDIR5"
 
@@ -259,9 +258,8 @@ fi
 
 # Test 7: boot hook leaves foreign .asoundrc alone
 echo "=== Testing boot hook does not remove foreign .asoundrc ==="
-TESTDIR6="$TMPDIR/rgsp-test-boot-foreign-$$"
+TESTDIR6="$TEST_ROOT/boot-foreign"
 mkdir -p "$TESTDIR6"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6'" EXIT
 export RGSP_RUN_DIR="$TESTDIR6"
 export USERDATA_PATH="$TESTDIR6"
 
@@ -286,9 +284,8 @@ fi
 
 # Test 8a: boot hook calls insmod when module is absent from lsmod
 echo "=== Testing boot hook calls insmod when module is absent ==="
-TESTDIR8="$TMPDIR/rgsp-test-boot-insmod-load-$$"
+TESTDIR8="$TEST_ROOT/boot-insmod-load"
 mkdir -p "$TESTDIR8"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6' '$TESTDIR8'" EXIT
 export RGSP_RUN_DIR="$TESTDIR8"
 export USERDATA_PATH="$TESTDIR8"
 export RGSP_PAK_DIR="$TESTDIR8/pak"
@@ -328,9 +325,8 @@ fi
 
 # Test 8b: boot hook skips insmod when module is already loaded
 echo "=== Testing boot hook skips insmod when module is loaded ==="
-TESTDIR9="$TMPDIR/rgsp-test-boot-insmod-skip-$$"
+TESTDIR9="$TEST_ROOT/boot-insmod-skip"
 mkdir -p "$TESTDIR9"
-trap "rm -rf '$TESTDIR' '$TESTDIR2' '$TESTDIR3' '$TESTDIR4' '$TESTDIR5' '$TESTDIR6' '$TESTDIR8' '$TESTDIR9'" EXIT
 export RGSP_RUN_DIR="$TESTDIR9"
 export USERDATA_PATH="$TESTDIR9"
 export RGSP_PAK_DIR="$TESTDIR9/pak"
