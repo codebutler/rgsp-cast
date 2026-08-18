@@ -23,6 +23,13 @@
  * rgsp_capture_next() and that overlay=1 reaches the real device's encoder
  * without failing.
  *
+ * RUN IT ON A STATIC SCREEN. The size comparison assumes the only thing
+ * changing between the two captures is the overlay flag. If the handheld is
+ * displaying anything animated, consecutive P-frames differ in size on their
+ * own and `with != without` passes whether or not the overlay did anything -
+ * the same class of false pass this test already had once, in a different
+ * disguise. A menu or a paused game is fine; an attract loop is not.
+ *
  * The marker is composited into the captured copy, never into the framebuffer
  * itself - the device's own display must be unchanged. (Not automatically
  * checked here - confirm visually that the handheld's own screen shows no
