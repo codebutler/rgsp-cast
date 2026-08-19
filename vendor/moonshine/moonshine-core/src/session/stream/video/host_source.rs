@@ -87,12 +87,32 @@ pub(crate) fn spawn_packetize_frames(
 
 		let mut packetizer = Packetizer::new(context.encrypt_video, keys_rx);
 		// Bound the warm-up to the shard counts this host actually produces.
-		// The full MAX_SHARDS sweep takes ~14s on this CPU and runs *after*
-		// `start.notified()`, i.e. once the client is already waiting for
-		// video - Moonlight times out with "no video received from host"
-		// before the first frame is ever packetized. 720x480 frames measured
-		// on device are 1-3 KB, so 64 data shards is far above what we emit;
-		// anything larger builds on demand and logs a trace line.
+		// The warm-up runs *after* `start.notified()`, i.e. once the client is
+		// already waiting for video, so its cost is dead time the client
+		// counts against us: Moonlight gives up with "no video received from
+		// host" before the first frame is ever packetized.
+		//
+		// 64 is a deliberate compromise, and both halves of it are measured on
+		// device - do not "fix" either without re-measuring:
+		//
+		//  - Raising it is what costs. Warming 1..=213 (a full FEC block at
+		//    20% parity) took **36 seconds**, because ReedSolomon matrix
+		//    construction climbs steeply with the shard count. Tried it: the
+		//    client connected, sat with no video, and disconnected at 14s.
+		//    Moving the warm-up before `start.notified()` does NOT rescue
+		//    this - the gate opens while the loop is still warming, so the
+		//    client waits exactly as long.
+		//
+		//  - Leaving it low costs little. A 720p session's keyframes are
+		//    ~100 KB = **130 data shards**, above this cap, so the first one
+		//    builds its encoder on the hot path: measured at **66.8 ms**, four
+		//    frame times at 60 fps. It happens once per distinct shard count
+		//    per session and is then cached (steady-state worst case after
+		//    that: 170 us).
+		//
+		// 36 s of no video versus a one-off 66.8 ms hitch is not a close call.
+		// Frames above the cap still work; they log the "creating a new one"
+		// trace, which is how you find out the cap is too low.
 		const WARM_UP_MAX_DATA_SHARDS: usize = 64;
 		packetizer.warm_up(
 			config.fec_percentage,
