@@ -39,7 +39,17 @@ pub trait ControlApi {
 
 #[rpc(server)]
 pub trait PinApi {
-    #[method(name = "submit_pin")]
+    // `param_kind = map`: the spec's UI client sends `{"id":..., "pin":...}`,
+    // a JSON object. The server-side decoder jsonrpsee 0.26 generates
+    // actually branches on `params.is_object()` at request time regardless
+    // of this attribute (verified: `tests/control.rs` passes the object
+    // shape even with the attribute removed), so this alone doesn't gate
+    // acceptance. It's kept because `param_kind` *does* control what shape
+    // the generated `PinApiClient` trait would encode if this crate ever
+    // called `submit_pin` through it instead of a raw `request(...)` — and
+    // because it documents, at the trait definition, the shape the spec
+    // actually promises callers.
+    #[method(name = "submit_pin", param_kind = map)]
     async fn submit_pin(&self, id: String, pin: String) -> RpcResult<PinResult>;
 }
 
@@ -116,14 +126,34 @@ impl ControlHandle {
 impl ControlApiServer for ControlHandle {
     async fn subscribe(&self, pending: PendingSubscriptionSink) -> SubscriptionResult {
         let sink = pending.accept().await?;
+
+        // Register interest before reading anything: `Notify::notify_waiters`
+        // stores no permit, it only wakes waiters already registered, so a
+        // change landing between reading the snapshot and this call would
+        // otherwise be silently dropped. `enable()` (not just `notified()`)
+        // is what actually registers us — `notified()` alone only registers
+        // once polled.
+        let changed = self.changed.clone();
+        let notified = changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         // Snapshot first: a late subscriber must not wait for the next change.
         let msg: jsonrpsee::server::SubscriptionMessage = to_json_raw_value(&self.snapshot())?.into();
         sink.send(msg).await?;
 
-        let changed = self.changed.clone();
         loop {
             tokio::select! {
-                _ = changed.notified() => {
+                _ = notified.as_mut() => {
+                    // Re-register immediately, before the `send` below can
+                    // suspend for a while: two `notify_waiters()` calls can
+                    // land back-to-back (e.g. `set_client` then
+                    // `set_casting`), and `CastState` is a full replacement,
+                    // not a diff, so missing the second one here would leave
+                    // the UI showing a stale mix indefinitely, not just late.
+                    notified.set(changed.notified());
+                    notified.as_mut().enable();
+
                     let msg: jsonrpsee::server::SubscriptionMessage = to_json_raw_value(&self.snapshot())?.into();
                     if sink.send(msg).await.is_err() {
                         break;

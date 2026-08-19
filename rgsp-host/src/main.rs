@@ -213,9 +213,9 @@ async fn serve(config: Config, control: &ControlHandle) -> anyhow::Result<()> {
         .get_uuid()
         .map_err(|()| anyhow::anyhow!("failed to read the server's unique id"))?;
 
-    // The socket is already serving (main.rs served it before the pidfile),
-    // so `submit_pin` calls made in the brief window before this point are
-    // answered with "pairing not available" rather than panicking or hanging.
+    // The socket is already serving (Step 3 in `main`, after the pidfile), so
+    // `submit_pin` calls made before this point are answered with "pairing
+    // not available" rather than panicking or hanging.
     control.set_client_manager(client_manager.clone());
 
     let _rtsp = RtspServer::new(
@@ -248,18 +248,29 @@ async fn serve(config: Config, control: &ControlHandle) -> anyhow::Result<()> {
 
     // Step 5: keep the UI's pending-pairing list current. `pending_changed`
     // fires after every mutation of the pending set, including removal on
-    // successful pairing, but `Notify::notify_waiters` stores no permit — so
-    // the snapshot is pushed once up front, before the loop ever awaits it,
-    // or a change landing between spawn and the first `notified().await`
-    // would be missed.
+    // successful pairing — and it can fire four times in a row at machine
+    // pace during the handshake (`clients.rs:155,205,239,274`). `Notify::
+    // notify_waiters` stores no permit: it only wakes waiters already
+    // registered, so we register (`enable()`) before ever reading state, and
+    // re-register immediately after each fire — before the next async call —
+    // so a fire landing while we're mid-update is still caught rather than
+    // lost outright. `pending` is a full replacement, not a diff, so a lost
+    // fire wouldn't just be late; it could leave the UI stuck on a stale list
+    // forever.
     let pending_watcher = {
         let control = control.clone();
         let client_manager = client_manager.clone();
         tokio::spawn(async move {
             let changed = client_manager.pending_changed();
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             control.set_pending(pending_entries(&client_manager));
             loop {
-                changed.notified().await;
+                notified.as_mut().await;
+                notified.set(changed.notified());
+                notified.as_mut().enable();
                 control.set_pending(pending_entries(&client_manager));
             }
         })
