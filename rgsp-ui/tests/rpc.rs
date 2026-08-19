@@ -96,6 +96,35 @@ fn snapshot_arrives_on_subscribe_and_submit_pin_round_trips() {
     assert!(control.is_connected());
 }
 
+// Mutation check: every other test in this file only ever exercises the
+// `connected == true` side. Delete both `self.connected = false;` lines in
+// `rpc.rs` and this is the only test that would notice — everything else
+// still passes. `poll_state`'s stream-ended/errored arm and `submit_pin`'s
+// non-`Call` error arm both set it; this pins the latter, which is easier to
+// trigger deterministically than waiting on the subscription stream to end.
+#[test]
+fn a_transport_failure_marks_the_connection_dead() {
+    let path = socket_path("transport-failure");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let server = runtime.block_on(start_server(
+        &path,
+        CastState { casting: false, client: None, pending: Vec::new() },
+    ));
+
+    let mut control = connected_control(&path);
+    assert!(control.is_connected(), "a fresh connection to a live server must report connected");
+
+    // Tear the server down out from under the already-connected client —
+    // this is the transport failure `submit_pin` should detect, as opposed
+    // to the RPC-level errors covered elsewhere in this file.
+    server.stop().expect("stop server");
+    runtime.block_on(server.stopped());
+
+    let result = control.submit_pin("some-id", "0000");
+    assert!(result.is_err(), "a dead server must not look like a successful (or even a rejected) pairing");
+    assert!(!control.is_connected(), "a transport failure, unlike an RPC error, must mark the client disconnected");
+}
+
 /// Starts a server whose `submit_pin` always fails with the given wire code
 /// (mirroring the daemon's real codes: `-32000` "pairing not available",
 /// `-32001` "unknown client or bad pin" — see `rgsp_host::control::PinApiServer`).

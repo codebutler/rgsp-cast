@@ -68,6 +68,14 @@ pub enum PinOutcome {
 ///
 /// Owns a current-thread `tokio` runtime so screens (which live on a plain
 /// synchronous frame loop) can drive it without becoming async themselves.
+///
+/// There is no reconnect logic: once a transport failure latches
+/// `connected` to `false` (see [`Control::is_connected`]), it stays `false`
+/// for the rest of this instance's life. That is by design, not an
+/// oversight — a fresh [`Control::connect`] *is* how the UI retries, since
+/// the connect itself is the liveness check this type exists to provide. A
+/// caller that sees `is_connected() == false` must construct a new
+/// `Control` to try again; this one will not heal itself.
 pub struct Control {
     runtime: tokio::runtime::Runtime,
     client: jsonrpsee::async_client::Client,
@@ -102,7 +110,9 @@ impl Control {
     }
 
     /// True once `connect` succeeded and no subsequent call has observed the
-    /// connection drop.
+    /// connection drop. Latches to `false` permanently once a transport
+    /// failure is observed — there is no reconnect, so a `false` here means
+    /// this `Control` is done; the caller must `connect` a new one.
     pub fn is_connected(&self) -> bool {
         self.connected
     }
