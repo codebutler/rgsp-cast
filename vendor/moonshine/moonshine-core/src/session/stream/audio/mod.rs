@@ -347,12 +347,12 @@ fn spawn_handle_audio_packets(
 				packet = stop.wrap_cancel(packet_rx.recv()) => {
 					match packet {
 						Ok(Some(packet)) => {
+							// Opus packet rate, at debug: 200 frames/s plus FEC
+							// parity. A rate below that means the encoder is
+							// starved and audio is being dropped upstream.
 							audio_packets += 1;
-							if last_audio_report.elapsed() >= std::time::Duration::from_secs(2) {
-								tracing::info!(
-									"AUDIODIAG {audio_packets} opus packets from the encoder, client_address={:?}",
-									client_address
-								);
+							if last_audio_report.elapsed() >= std::time::Duration::from_secs(10) {
+								tracing::debug!("audio: {audio_packets} opus packets in 10s");
 								audio_packets = 0;
 								last_audio_report = std::time::Instant::now();
 							}

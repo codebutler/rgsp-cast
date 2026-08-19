@@ -241,8 +241,8 @@ impl VideoStream {
             })?;
 
             let blocked_ms = send_started.elapsed().as_secs_f32() * 1000.0;
-            if last_latency_log.elapsed() >= Duration::from_secs(1) {
-                tracing::info!("latency: encode {encode_ms:.1} ms, queue wait {blocked_ms:.1} ms");
+            if last_latency_log.elapsed() >= Duration::from_secs(30) {
+                tracing::debug!("latency: encode {encode_ms:.1} ms, queue wait {blocked_ms:.1} ms");
                 last_latency_log = Instant::now();
             }
         }

@@ -470,8 +470,8 @@ fn run_audio(pcm_tx: Option<mpsc::Sender<Vec<i16>>>) -> anyhow::Result<()> {
         let peak = buf.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
         loudest = loudest.max(peak);
         periods += 1;
-        if last_audio_log.elapsed() >= std::time::Duration::from_secs(2) {
-            tracing::info!("audio: {periods} periods captured, peak amplitude {loudest}");
+        if last_audio_log.elapsed() >= std::time::Duration::from_secs(30) {
+            tracing::debug!("audio: {periods} periods captured, peak amplitude {loudest}");
             last_audio_log = std::time::Instant::now();
             loudest = 0;
             periods = 0;
