@@ -161,10 +161,9 @@ src/rgsp-cast-cli.c              standalone capture tool over that library
 scripts/install-pak.sh           install pak + hooks + vendor libs on the device
 scripts/extract-vendor-libs.sh   pull CedarC libs from TrimUI firmware
 scripts/build-snd-aloop.sh       build snd-aloop.ko for the stock kernel
+scripts/reference/               the device's own kernel config, from IKCFG_ST
 scripts/monitor.sh               raw CPU/GPU/thermal sampler
 bin/snd-aloop.ko                 the built module (vermagic + CRCs match stock)
-reference/stock-kernel-4.9.170.config
-                                 the device's own kernel config, from IKCFG_ST
 Makefile                         build / deploy / run / monitor
 ```
 
@@ -525,7 +524,7 @@ Three checks predicted that, and are worth re-running against any future kernel:
 The stock values come from the device itself. The kernel is built with
 `CONFIG_IKCONFIG_PROC=y`, so it embeds its own gzipped config between `IKCFG_ST`
 and `IKCFG_ED` markers in the disk image; that is saved as
-`reference/stock-kernel-4.9.170.config`, 4,209 lines of ground truth.
+`scripts/reference/stock-kernel-4.9.170.config`, 4,209 lines of ground truth.
 
 Requirements the build has to satisfy, all encoded in the script:
 

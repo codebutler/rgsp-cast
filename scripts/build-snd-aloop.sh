@@ -25,7 +25,7 @@ set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT="$HERE/../bin"
-CONFIG="$HERE/../reference/stock-kernel-4.9.170.config"
+CONFIG="$HERE/reference/stock-kernel-4.9.170.config"
 VOLUME=rgsp-kbuild
 IMAGE=ubuntu:18.04          # gcc 7.5; modern gcc will not build a 4.9 kernel
 
@@ -76,4 +76,4 @@ echo "  ssh root@DEVICE 'insmod /tmp/snd-aloop.ko && cat /proc/asound/cards'"
 echo
 echo "It must load WITHOUT --force. If insmod reports a vermagic or symbol"
 echo "mismatch, stop - do not force it - and re-check the build against"
-echo "reference/stock-kernel-4.9.170.config."
+echo "scripts/reference/stock-kernel-4.9.170.config."
