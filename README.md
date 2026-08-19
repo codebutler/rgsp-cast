@@ -160,10 +160,10 @@ src/rgsp-cast.c                  the capture library and standalone tool
 scripts/install-pak.sh           install pak + hooks + vendor libs on the device
 scripts/extract-vendor-libs.sh   pull CedarC libs from TrimUI firmware
 scripts/build-snd-aloop.sh       build snd-aloop.ko for the stock kernel
+scripts/monitor.sh               raw CPU/GPU/thermal sampler
 bin/snd-aloop.ko                 the built module (vermagic + CRCs match stock)
 reference/stock-kernel-4.9.170.config
                                  the device's own kernel config, from IKCFG_ST
-tools/monitor.sh                 raw CPU/GPU/thermal sampler
 Makefile                         build / deploy / run / monitor
 ```
 
@@ -607,7 +607,7 @@ Caveats:
 
 Measured on-device, 30 s capture of live gameplay (GBA via `minarch.elf`), with
 a 10 s no-capture baseline for comparison. Raw counters sampled at 4 Hz by
-`tools/monitor.sh`; all arithmetic done off-device so sampling does not distort
+`scripts/monitor.sh`; all arithmetic done off-device so sampling does not distort
 the measurement.
 
 | | baseline | during capture | delta |

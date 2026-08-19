@@ -57,7 +57,7 @@ bin/test-idr-cadence: tests/test_idr_cadence.c librgspcast.a
 
 deploy: $(BINS)
 	ssh $(DEVICE) 'mkdir -p $(DESTDIR)'
-	scp -q $(BINS) tools/monitor.sh $(DEVICE):$(DESTDIR)/
+	scp -q $(BINS) scripts/monitor.sh $(DEVICE):$(DESTDIR)/
 
 # make run DURATION=30 OUT=session.h264
 DURATION ?= 30
