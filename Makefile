@@ -15,9 +15,16 @@ CFLAGS  ?= -O2 -Wall -Wextra
 
 all: bin/snd-aloop.ko
 
-deploy: $(BINS)
-	ssh $(DEVICE) 'mkdir -p $(DESTDIR)'
-	scp -q $(BINS) scripts/monitor.sh $(DEVICE):$(DESTDIR)/
+# The standalone `bin/rgsp-cast` capture-only binary this deployed is gone:
+# it linked librgspcast.a, deleted with the rest of src/rgsp-cast.c. Its
+# replacement is the Rust CLI at rgsp-cedar/src/bin/rgsp-cast.rs. Task 10/11
+# should repoint deploy/run/monitor at that binary and drop this stub; until
+# then, fail loudly rather than silently scp'ing nothing to the device.
+deploy:
+	@echo "deploy: the standalone capture binary moved to the Rust CLI" >&2
+	@echo "  (rgsp-cedar/src/bin/rgsp-cast.rs) and this target was not yet" >&2
+	@echo "  repointed at it - see the comment above this recipe." >&2
+	@false
 
 # make run DURATION=30 OUT=session.h264
 DURATION ?= 30
