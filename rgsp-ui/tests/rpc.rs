@@ -5,7 +5,7 @@
 //! directly from a plain `RpcModule` rather than the daemon's real handle.
 
 use jsonrpsee::{PendingSubscriptionSink, RpcModule, SubscriptionMessage};
-use rgsp_ui::rpc::{CastState, Control, PinResult};
+use rgsp_ui::rpc::{CastState, Control, PinOutcome, PinResult};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,18 +91,20 @@ fn snapshot_arrives_on_subscribe_and_submit_pin_round_trips() {
     assert!(!snapshot.casting);
     assert!(snapshot.pending.is_empty());
 
-    let paired = control.submit_pin("some-client-id", "1234").expect("submit_pin");
-    assert!(paired);
+    let outcome = control.submit_pin("some-client-id", "1234").expect("submit_pin");
+    assert_eq!(outcome, PinOutcome::Paired);
     assert!(control.is_connected());
 }
 
-#[test]
-fn submit_pin_surfaces_an_rpc_error_without_marking_the_connection_dead() {
-    let path = socket_path("pin-error");
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let called = Arc::new(AtomicBool::new(false));
-    let called_in_handler = called.clone();
-
+/// Starts a server whose `submit_pin` always fails with the given wire code
+/// (mirroring the daemon's real codes: `-32000` "pairing not available",
+/// `-32001` "unknown client or bad pin" — see `rgsp_host::control::PinApiServer`).
+async fn start_pin_error_server(
+    path: &str,
+    code: i32,
+    message: &'static str,
+    called: Arc<AtomicBool>,
+) -> jsonrpsee::server::ServerHandle {
     let mut module = RpcModule::new(());
     module
         .register_subscription(
@@ -120,28 +122,63 @@ fn submit_pin_surfaces_an_rpc_error_without_marking_the_connection_dead() {
         .expect("register state_subscribe");
     module
         .register_method("submit_pin", move |_params, _ctx, _| {
-            called_in_handler.store(true, Ordering::SeqCst);
-            Err::<PinResult, _>(jsonrpsee::types::ErrorObjectOwned::owned(
-                -32000,
-                "pairing not available",
-                None::<()>,
-            ))
+            called.store(true, Ordering::SeqCst);
+            Err::<PinResult, _>(jsonrpsee::types::ErrorObjectOwned::owned(code, message, None::<()>))
         })
         .expect("register submit_pin");
 
-    let server = reth_ipc::server::Builder::default().build(path.clone());
-    let _server = runtime.block_on(server.start(module)).expect("start server");
+    let server = reth_ipc::server::Builder::default().build(path.to_string());
+    server.start(module).await.expect("start server")
+}
 
-    let mut control = Control::connect(&path).expect("connect");
+/// Connects and drains the initial snapshot so the caller starts from a
+/// known-clean subscription state. The server this dials must already be
+/// running on a runtime that outlives this call.
+fn connected_control(path: &str) -> Control {
+    let mut control = Control::connect(path).expect("connect");
     for _ in 0..200 {
         if control.poll_state().is_some() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    control
+}
 
-    let err = control.submit_pin("some-id", "0000").expect_err("pairing not available");
-    assert!(err.to_string().contains("pairing not available"), "unexpected error: {err}");
-    assert!(called.load(Ordering::SeqCst));
-    assert!(control.is_connected(), "an RPC error from a live daemon must not look like a dead connection");
+// Pins the distinction the daemon's two wire codes must keep: -32000 means
+// "not ready yet, retry" and -32001 means "rejected, re-enter the PIN". A
+// client that collapsed both into one case (or matched on message text)
+// would not catch these two codes drifting back together.
+#[test]
+fn submit_pin_distinguishes_not_ready_from_rejected() {
+    let not_ready_path = socket_path("pin-not-ready");
+    let rejected_path = socket_path("pin-rejected");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let not_ready_called = Arc::new(AtomicBool::new(false));
+    let rejected_called = Arc::new(AtomicBool::new(false));
+
+    let _not_ready_server = runtime.block_on(start_pin_error_server(
+        &not_ready_path,
+        -32000,
+        "pairing not available",
+        not_ready_called.clone(),
+    ));
+    let _rejected_server = runtime.block_on(start_pin_error_server(
+        &rejected_path,
+        -32001,
+        "unknown client or bad pin",
+        rejected_called.clone(),
+    ));
+
+    let mut not_ready_control = connected_control(&not_ready_path);
+    let outcome = not_ready_control.submit_pin("some-id", "0000").expect("not-ready is not a transport error");
+    assert_eq!(outcome, PinOutcome::NotReady);
+    assert!(not_ready_called.load(Ordering::SeqCst));
+    assert!(not_ready_control.is_connected(), "a live daemon's answer must not look like a dead connection");
+
+    let mut rejected_control = connected_control(&rejected_path);
+    let outcome = rejected_control.submit_pin("some-id", "9999").expect("rejected is not a transport error");
+    assert_eq!(outcome, PinOutcome::Rejected);
+    assert!(rejected_called.load(Ordering::SeqCst));
+    assert!(rejected_control.is_connected(), "a live daemon's answer must not look like a dead connection");
 }

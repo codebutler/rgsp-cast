@@ -174,7 +174,7 @@ impl PinApiServer for ControlHandle {
         };
         match client_manager.register_pin(&id, &pin) {
             Ok(()) => Ok(PinResult { paired: true }),
-            Err(()) => Err(ErrorObjectOwned::owned(-32000, "unknown client or bad pin", None::<()>)),
+            Err(()) => Err(ErrorObjectOwned::owned(-32001, "unknown client or bad pin", None::<()>)),
         }
     }
 }

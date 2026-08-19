@@ -37,6 +37,33 @@ pub struct PinResult {
 
 const SUBMIT_PIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The daemon's control socket uses distinct JSON-RPC error codes for the
+/// two ways `submit_pin` can fail while the daemon is alive and answering
+/// (`rgsp_host::control::PinApiServer::submit_pin`):
+/// - `-32000` "pairing not available" — the daemon's `ClientManager` isn't
+///   wired up yet (its startup window). The caller should wait and retry.
+/// - `-32001` "unknown client or bad pin" — the daemon checked the id/pin
+///   and rejected it. The caller should have the user re-enter the PIN.
+///
+/// A transport-level failure (dropped connection, timeout) is a third,
+/// separate case — it surfaces as `Err` from [`Control::submit_pin`], not as
+/// a variant here, since it means the daemon never answered at all.
+const NOT_READY_CODE: i32 = -32000;
+const REJECTED_CODE: i32 = -32001;
+
+/// The daemon's answer to `submit_pin`, once it has actually answered (as
+/// opposed to a transport failure, which is a plain `Err`). See the module
+/// constants above for the wire codes this distinguishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinOutcome {
+    /// Pairing succeeded.
+    Paired,
+    /// The daemon isn't ready to pair yet — retry.
+    NotReady,
+    /// The daemon rejected the id/pin — have the user re-enter it.
+    Rejected,
+}
+
 /// A live connection to the daemon's control socket.
 ///
 /// Owns a current-thread `tokio` runtime so screens (which live on a plain
@@ -100,13 +127,12 @@ impl Control {
         })
     }
 
-    /// Submits a pairing PIN. Returns `Ok(true)`/`Ok(false)` for
-    /// `PinResult::paired`. An RPC error such as `-32000 "pairing not
-    /// available"` (the daemon's startup window before its `ClientManager`
-    /// exists) is a legitimate, expected response — it surfaces as `Err`,
-    /// same as any other pairing failure, without marking the connection
-    /// dead. Only a transport-level failure does that.
-    pub fn submit_pin(&mut self, id: &str, pin: &str) -> anyhow::Result<bool> {
+    /// Submits a pairing PIN. Returns a [`PinOutcome`] once the daemon has
+    /// answered — success, not-ready-yet, or rejected are all legitimate,
+    /// expected responses, not crashes, and none of them mark the
+    /// connection dead. Only a transport-level failure (dropped connection,
+    /// timeout) does that, and surfaces as `Err`.
+    pub fn submit_pin(&mut self, id: &str, pin: &str) -> anyhow::Result<PinOutcome> {
         let mut params = ObjectParams::new();
         params.insert("id", id).context("encoding id")?;
         params.insert("pin", pin).context("encoding pin")?;
@@ -117,13 +143,24 @@ impl Control {
         });
 
         match outcome {
-            Ok(Ok(PinResult { paired })) => Ok(paired),
-            Ok(Err(err @ jsonrpsee::core::client::Error::Call(_))) => {
-                // A well-formed RPC error (e.g. "pairing not available")
-                // means the daemon is alive and answered — not a dropped
-                // connection.
-                Err(err.into())
+            Ok(Ok(PinResult { paired: true })) => Ok(PinOutcome::Paired),
+            Ok(Ok(PinResult { paired: false })) => {
+                // The daemon only ever returns `Ok` on success (see
+                // `PinApiServer::submit_pin`) — a false `paired` here would
+                // be a wire-contract surprise, not one of the two documented
+                // failure codes, so it doesn't fit `PinOutcome`.
+                Err(anyhow::anyhow!("submit_pin succeeded but reported paired: false"))
             }
+            Ok(Err(jsonrpsee::core::client::Error::Call(err))) => match err.code() {
+                NOT_READY_CODE => Ok(PinOutcome::NotReady),
+                REJECTED_CODE => Ok(PinOutcome::Rejected),
+                // An RPC error with a code the client doesn't recognize is
+                // still an answer from a live daemon, not a dropped
+                // connection — but it's not one of the two documented
+                // outcomes either, so it surfaces as a plain error rather
+                // than being forced into `PinOutcome`.
+                _ => Err(err.into()),
+            },
             Ok(Err(err)) => {
                 self.connected = false;
                 Err(err.into())
