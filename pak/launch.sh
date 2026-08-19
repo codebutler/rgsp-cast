@@ -26,10 +26,12 @@ if usleep 1 2>/dev/null; then
     SLEEP_CMD="usleep 100000"
     STOP_WAIT_ITERS=150  # ~15 seconds
     START_WAIT_ITERS=50  # ~5 seconds
+    SHOW_KILL_ITERS=10   # ~1 second
 else
     SLEEP_CMD="sleep 1"  # Integer fallback
     STOP_WAIT_ITERS=15   # ~15 seconds
     START_WAIT_ITERS=5   # ~5 seconds
+    SHOW_KILL_ITERS=2    # ~2 seconds
 fi
 
 show_status() {
@@ -45,7 +47,22 @@ show_status() {
     fi
     SHOW_PID=$!
     sleep 2
-    kill "$SHOW_PID" 2>/dev/null || true
+    # SIGINT, not SIGTERM. show2.cpp registers a handler for SIGINT alone, and
+    # its SDL_Init(SDL_INIT_VIDEO) runs without SDL_INIT_NOPARACHUTE, so SDL's
+    # parachute claims SIGTERM and turns it into an SDL_QUIT event -- which
+    # show2 never reads, as it does not poll the SDL event queue at all. A
+    # SIGTERMed show2 therefore draws forever, holding /dev/fb0 and /dev/mali0,
+    # page-flipping against nextui.elf until the device reboots. (NextUI's own
+    # show2 README recommends `kill $SHOW_PID` here; that advice does not work,
+    # and MinUI.pak/launch.sh quietly `killall -9 show2.elf`s at boot to cope.)
+    # Escalate rather than ever leave one behind.
+    kill -INT "$SHOW_PID" 2>/dev/null || true
+    i=0
+    while kill -0 "$SHOW_PID" 2>/dev/null && [ $i -lt "$SHOW_KILL_ITERS" ]; do
+        i=$((i+1)); $SLEEP_CMD
+    done
+    kill -KILL "$SHOW_PID" 2>/dev/null || true
+    wait "$SHOW_PID" 2>/dev/null || true
 }
 
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then

@@ -4,7 +4,13 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 TMPBASE="${TMPDIR:-.}"
 TMP=$(mktemp -d "$TMPBASE/test-XXXXXX")
-trap 'rm -rf "$TMP"; killall -9 rgsp-host 2>/dev/null || true' EXIT
+cleanup() {
+    # SIGINT, not SIGTERM: that is the only signal show2 honours (see the stub).
+    [ -f "${SHOW2_PIDS:-}" ] && while read -r p; do kill -INT "$p" 2>/dev/null || true; done < "$SHOW2_PIDS"
+    rm -rf "$TMP"
+    killall -9 rgsp-host 2>/dev/null || true
+}
+trap cleanup EXIT
 
 # CRITICAL: Verify the committed launch.sh is executable (fix for mode bit regression)
 # Skip gracefully if not in a git repository (e.g., from tarball)
@@ -46,22 +52,56 @@ done
 EOF
 chmod +x "$TMP/pak/rgsp-host" "$TMP/pak/launch.sh"
 
-# Stub show2 so the script does not need NextUI.
+# Stub show2 so the script does not need NextUI. It models the real
+# show2.elf's signal handling, which is what these assertions exist to catch:
+# SDL's parachute swallows SIGTERM into an SDL_QUIT nobody polls, so show2
+# keeps running in BOTH --mode=simple and --mode=progress and exits only on
+# SIGINT (confirmed against show2.cpp and on-device). It holds /dev/fb0 and
+# /dev/mali0 the whole time, so one that outlives the pak page-flips against
+# nextui.elf and the launcher UI stays corrupted until the device reboots.
 mkdir -p "$TMP/bin"
-printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/show2.elf"
+cat > "$TMP/bin/show2.elf" <<'SHOW2STUB'
+#!/bin/sh
+echo $$ >> "$SHOW2_PIDS"
+trap '' TERM
+trap 'exit 0' INT
+while :; do usleep 100000 2>/dev/null || sleep 1; done
+SHOW2STUB
 chmod +x "$TMP/bin/show2.elf"
 
 export PATH="$TMP/bin:$PATH"
 export RGSP_RUN_DIR="$TMP/run"
 export SHARED_USERDATA_PATH="$TMP/userdata"
+export SHOW2_PIDS="$TMP/show2.pids"
+: > "$SHOW2_PIDS"
+
+# No show2 may outlive launch.sh. A survivor is the framebuffer-corruption bug.
+assert_no_show2() {
+    leaked=
+    while read -r p; do
+        kill -0 "$p" 2>/dev/null && leaked="$leaked $p"
+    done < "$SHOW2_PIDS"
+    if [ -n "$leaked" ]; then
+        echo "FAIL: $1: show2 outlived launch.sh (pids:$leaked)"
+        echo "      a live show2 holds /dev/fb0 and corrupts the launcher UI"
+        exit 1
+    fi
+}
+
+LAUNCH_N=0
+run_launch() {
+    LAUNCH_N=$((LAUNCH_N + 1))
+    sh "$TMP/pak/launch.sh"
+    assert_no_show2 "launch #$LAUNCH_N"
+}
 
 echo "--- first launch should start the daemon ---"
-sh "$TMP/pak/launch.sh"
+run_launch
 PID=$(cat "$TMP/run/daemon.pid")
 kill -0 "$PID" || { echo "FAIL: daemon not running"; exit 1; }
 
 echo "--- second launch should stop it (SIGTERM must be delivered and handled) ---"
-sh "$TMP/pak/launch.sh"
+run_launch
 sleep 1
 if kill -0 "$PID" 2>/dev/null; then echo "FAIL: daemon still running"; exit 1; fi
 [ -f "$TMP/run/daemon.pid" ] && { echo "FAIL: pidfile left behind"; exit 1; }
@@ -78,12 +118,12 @@ sleep 300
 STUBSTUCK
 chmod +x "$TMP/pak/rgsp-host"
 
-sh "$TMP/pak/launch.sh"
+run_launch
 PID2=$(cat "$TMP/run/daemon.pid")
 kill -0 "$PID2" || { echo "FAIL: daemon not running"; exit 1; }
 
 echo "--- third launch should detect stuck daemon ---"
-sh "$TMP/pak/launch.sh"
+run_launch
 sleep 1
 # Daemon should still be running
 if ! kill -0 "$PID2" 2>/dev/null; then echo "FAIL: stuck daemon was killed"; exit 1; fi
