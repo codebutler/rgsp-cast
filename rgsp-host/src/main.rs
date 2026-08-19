@@ -45,8 +45,11 @@ const LOOPBACK_CAPTURE_DEVICE: &str = "hw:Loopback,1,0";
 /// card rather than living on the rootfs.
 const DEFAULT_USERDATA: &str = "/mnt/SDCARD/.userdata/h700";
 
-/// The on-device UI's JSON-RPC control socket. Bound before the pidfile is
-/// written, so that a UI which sees the pidfile always finds a live socket.
+/// The on-device UI's JSON-RPC control socket. `ControlHandle::serve` unlinks
+/// this path before binding, so it must be served *after* the pidfile is
+/// held — the flock is what makes a stale path from a dead daemon safe to
+/// unlink, and what stops a second, losing instance from unlinking a live
+/// one's socket out from under it.
 const CONTROL_SOCKET: &str = "/tmp/rgsp/control.sock";
 
 /// How often to check whether a Moonlight client has started a session.
@@ -93,52 +96,21 @@ fn main() -> std::process::ExitCode {
         std::env::var("RGSP_USERDATA").unwrap_or_else(|_| DEFAULT_USERDATA.to_string()),
     );
 
-    // Loaded before the runtime exists: it sets `XDG_DATA_HOME`, and mutating
-    // the environment with other threads running is the pattern Rust 2024 made
-    // `unsafe`. Loaded before the pidfile too, so that building the runtime
-    // and serving the control socket (both below) never race a second
-    // instance's config write against this one's.
-    let config = match load_config(&userdata) {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::error!("{e:#}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::error!("failed to start the tokio runtime: {e}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-
-    // Step 1: serve the control socket before the pidfile is written, so
-    // that a UI which sees the pidfile always finds a live socket rather than
-    // racing this daemon's startup.
-    let control = ControlHandle::new();
-    let control_socket = match runtime.block_on(control.clone().serve(CONTROL_SOCKET)) {
-        Ok(handle) => handle,
-        Err(e) => {
-            tracing::error!("failed to serve the control socket: {e:#}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-
-    // Step 2: the pidfile is the mutual exclusion for the whole daemon, so it
-    // is taken before anything else with a side effect.
+    // Step 1: the pidfile is the mutual exclusion for the whole daemon, so it
+    // is taken before anything with a side effect — including binding the
+    // control socket, which unlinks whatever is already at that path before
+    // it binds. Without the pidfile held first, a losing second instance
+    // could unlink a first instance's *live* socket out from under it.
     let pid_path = PathBuf::from("/tmp/rgsp/daemon.pid");
     let pidfile = match PidFile::acquire(&pid_path) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!("rgsp-host is already running ({e})");
-            let _ = control_socket.stop();
             return std::process::ExitCode::FAILURE;
         }
     };
 
-    // Step 3: route game audio into the loopback. From here on, EVERY exit
+    // Step 2: route game audio into the loopback. From here on, EVERY exit
     // path must run `release()` — while this is engaged the handheld's
     // speaker is silent, and nothing else restores it.
     let cast_sink = match CastSink::engage(&userdata) {
@@ -146,8 +118,37 @@ fn main() -> std::process::ExitCode {
         Err(e) => {
             tracing::error!("failed to route audio to the loopback: {e:#}");
             pidfile.release();
-            let _ = control_socket.stop();
             return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    // Loaded before the runtime exists: it sets `XDG_DATA_HOME`, and mutating
+    // the environment with other threads running is the pattern Rust 2024 made
+    // `unsafe`. Nothing here needs async.
+    let config = match load_config(&userdata) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("{e:#}");
+            return shutdown(cast_sink, pidfile, std::process::ExitCode::FAILURE);
+        }
+    };
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("failed to start the tokio runtime: {e}");
+            return shutdown(cast_sink, pidfile, std::process::ExitCode::FAILURE);
+        }
+    };
+
+    // Step 3: serve the control socket, now that the pidfile guarantees we're
+    // the only instance that could be unlinking a stale path at CONTROL_SOCKET.
+    let control = ControlHandle::new();
+    let control_socket = match runtime.block_on(control.clone().serve(CONTROL_SOCKET)) {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::error!("failed to serve the control socket: {e:#}");
+            return shutdown(cast_sink, pidfile, std::process::ExitCode::FAILURE);
         }
     };
 
