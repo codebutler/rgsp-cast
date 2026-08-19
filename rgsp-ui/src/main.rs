@@ -1,10 +1,34 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use rgsp_ui::rpc::{CastState, Control, PinOutcome};
 use rgsp_ui::screens::home::{Home, HomeAction};
 use rgsp_ui::screens::pin::{Pin, PinAction};
 use rgsp_ui::service::Service;
 use rgsp_ui::ui::Ui;
+
+/// Minimum spacing between reconnect attempts while the daemon is down.
+///
+/// `Control::connect` doesn't just probe the socket -- it builds and, on
+/// failure, tears down a full tokio current-thread runtime (see
+/// `rpc::Control::connect`). While the service is stopped, the normal idle
+/// state of this screen, calling it every frame would construct and drop
+/// that runtime dozens of times a second on a battery-powered handheld. The
+/// socket refusal itself is cheap; the runtime around it is not. 500ms is
+/// far below what a person can perceive as latency here, but keeps the
+/// retry off the per-frame hot path.
+const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Whether enough time has passed since the last reconnect attempt
+/// (`last_attempt`, or never if `None`) to try again at `now`. Pulled out
+/// of the main loop as a plain function so the throttle policy is
+/// unit-testable rather than buried in the loop's control flow.
+fn should_reconnect(last_attempt: Option<Instant>, now: Instant) -> bool {
+    match last_attempt {
+        None => true,
+        Some(t) => now.duration_since(t) >= RECONNECT_INTERVAL,
+    }
+}
 
 /// Where the daemon puts its pidfile, log, and control socket. Mirrors the
 /// pak's own hooks (`pak/hooks/*/10-rgsp-*.sh`), which read the same
@@ -45,6 +69,7 @@ fn main() -> anyhow::Result<()> {
     // is retried below by constructing a fresh one, once per frame, rather
     // than waiting on this one to heal itself (it never will).
     let mut control = Control::connect(&socket_path.to_string_lossy()).ok();
+    let mut last_reconnect_attempt = Some(Instant::now());
     let mut state = CastState { casting: false, client: None, pending: Vec::new() };
     let mut screen = Screen::Home(Home::new());
 
@@ -53,13 +78,16 @@ fn main() -> anyhow::Result<()> {
 
         let connected = control.as_ref().is_some_and(Control::is_connected);
         if !connected {
-            // A refused connect on a Unix socket returns fast, so retrying
-            // every frame while the daemon is down is cheap. Until it
-            // reconnects, the service reads as stopped and pending clients
-            // are unknown rather than stale.
-            control = Control::connect(&socket_path.to_string_lossy()).ok();
-            if control.is_none() {
-                state = CastState { casting: false, client: None, pending: Vec::new() };
+            // Until it reconnects, the service reads as stopped and pending
+            // clients are unknown rather than stale. See
+            // `RECONNECT_INTERVAL` for why this doesn't retry every frame.
+            let now = Instant::now();
+            if should_reconnect(last_reconnect_attempt, now) {
+                control = Control::connect(&socket_path.to_string_lossy()).ok();
+                last_reconnect_attempt = Some(now);
+                if control.is_none() {
+                    state = CastState { casting: false, client: None, pending: Vec::new() };
+                }
             }
         }
         if let Some(c) = control.as_mut()
@@ -112,6 +140,20 @@ fn main() -> anyhow::Result<()> {
                 PinAction::Back => next_screen = Some(Screen::Home(Home::new())),
                 PinAction::Submit(code) => {
                     let id = pin.client_id().to_string();
+                    // `submit_pin` below blocks the frame loop for up to
+                    // `SUBMIT_PIN_TIMEOUT` (5s) with no way to interleave
+                    // drawing -- same problem as `HomeAction::Toggle` above,
+                    // same fix: draw and present twice before the call so
+                    // the message lands in both of the panel's double
+                    // buffers, not just the one that won't show until the
+                    // next flip.
+                    for _ in 0..2 {
+                        ui.begin();
+                        ui.header("Pair");
+                        ui.row("Pairing", Some("Pairing..."), 0, true);
+                        ui.hints(&[]);
+                        ui.end();
+                    }
                     match control.as_mut().map(|c| c.submit_pin(&id, &code)) {
                         Some(Ok(PinOutcome::Paired)) => next_screen = Some(Screen::Home(Home::new())),
                         // Wrong PIN: the user should retype it.
@@ -141,4 +183,34 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_attempt_is_never_throttled() {
+        assert!(should_reconnect(None, Instant::now()));
+    }
+
+    #[test]
+    fn an_attempt_right_after_the_last_one_is_throttled() {
+        let last = Instant::now();
+        assert!(!should_reconnect(Some(last), last));
+    }
+
+    #[test]
+    fn an_attempt_just_shy_of_the_interval_is_still_throttled() {
+        let last = Instant::now();
+        let almost = last + RECONNECT_INTERVAL - Duration::from_millis(1);
+        assert!(!should_reconnect(Some(last), almost));
+    }
+
+    #[test]
+    fn an_attempt_at_or_past_the_interval_is_allowed() {
+        let last = Instant::now();
+        assert!(should_reconnect(Some(last), last + RECONNECT_INTERVAL));
+        assert!(should_reconnect(Some(last), last + RECONNECT_INTERVAL + Duration::from_millis(1)));
+    }
 }
