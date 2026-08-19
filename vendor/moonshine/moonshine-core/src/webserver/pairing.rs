@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr};
 
 use async_shutdown::ShutdownManager;
 use http_body_util::Full;
@@ -7,11 +7,9 @@ use hyper::{
 	body::Bytes,
 	header::{self, HeaderValue},
 };
-use tokio::sync::Notify;
 
 use crate::ShutdownReason;
 use crate::clients::ClientManager;
-use crate::clients::PendingClient;
 use crate::webserver::bad_request;
 
 /// Extract a required query parameter, or return a 400 bad-request response.
@@ -126,6 +124,11 @@ async fn get_server_cert(
 
 	let unique_id = require_param!(params, "uniqueid");
 
+	// Moonlight sends a human-readable name here. It is optional: treat its
+	// absence as unnamed rather than as an error, so pairing still works if a
+	// client omits it.
+	let device_name = params.get("devicename").cloned();
+
 	let salt = require_param!(params, "salt");
 	let salt = match hex::decode(salt) {
 		Ok(salt) => salt,
@@ -144,30 +147,7 @@ async fn get_server_cert(
 		},
 	};
 
-	let pin_notifier = {
-		let pending_client = PendingClient {
-			id: unique_id.clone(),
-			pem: client_pem,
-			salt,
-			pin_notify: Arc::new(Notify::new()),
-			key: None,
-			server_secret: None,
-			server_challenge: None,
-			client_hash: None,
-		};
-		let notify = pending_client.pin_notify.clone();
-
-		match client_manager.start_pairing(pending_client) {
-			Ok(()) => {},
-			Err(()) => {
-				let message = "Failed to start pairing client".to_string();
-				tracing::warn!("{message}");
-				return bad_request(message);
-			},
-		};
-
-		notify
-	};
+	let pin_notifier = client_manager.add_pending(unique_id.clone(), client_pem, salt, device_name);
 
 	// The desktop notification that offered to open the PIN page needed
 	// notify-rust and open; log the URL instead.

@@ -25,6 +25,9 @@ pub(crate) struct PendingClient {
 	/// Unique id of the client.
 	pub(crate) id: String,
 
+	/// Human-readable name Moonlight sent as `devicename`, when it sent one.
+	pub(crate) name: Option<String>,
+
 	/// Client certificate used for secure communication (PEM format).
 	pub(crate) pem: String,
 
@@ -47,6 +50,13 @@ pub(crate) struct PendingClient {
 	pub(crate) client_hash: Option<Vec<u8>>,
 }
 
+/// A client waiting for a PIN, as shown by the on-device UI.
+#[derive(Clone, Debug)]
+pub struct PendingInfo {
+	pub id: String,
+	pub name: Option<String>,
+}
+
 /// Manages client pairing state and operations.
 ///
 /// This is a synchronous manager backed by an `Arc<RwLock>`. It holds pending client state
@@ -54,6 +64,11 @@ pub(crate) struct PendingClient {
 #[derive(Clone)]
 pub struct ClientManager {
 	pending_clients: Arc<RwLock<BTreeMap<String, PendingClient>>>,
+
+	/// Fires whenever the pending set changes, so a subscriber can push a
+	/// fresh snapshot instead of polling.
+	pending_changed: Arc<Notify>,
+
 	state: PersistentState,
 	server_cert_pem: String,
 	server_private_key_pem: String,
@@ -63,10 +78,55 @@ impl ClientManager {
 	pub fn new(server_cert_pem: String, server_private_key_pem: String) -> Result<Self, ()> {
 		Ok(Self {
 			pending_clients: Arc::new(RwLock::new(BTreeMap::new())),
+			pending_changed: Arc::new(Notify::new()),
 			state: PersistentState::new()?,
 			server_cert_pem,
 			server_private_key_pem,
 		})
+	}
+
+	/// Clients waiting for a PIN. The on-device UI lists these.
+	pub fn pending_clients(&self) -> Vec<PendingInfo> {
+		let Ok(inner) = self.pending_clients.read() else {
+			tracing::error!("RwLock poisoned reading pending clients");
+			return Vec::new();
+		};
+		inner
+			.values()
+			.map(|c| PendingInfo { id: c.id.clone(), name: c.name.clone() })
+			.collect()
+	}
+
+	/// Fires whenever the pending set changes, so a subscriber can push a
+	/// fresh snapshot instead of polling.
+	pub fn pending_changed(&self) -> Arc<Notify> {
+		self.pending_changed.clone()
+	}
+
+	/// Insert a pending client, signal the change, and return the `Notify`
+	/// that fires once a PIN has been received for it.
+	pub(crate) fn add_pending(&self, id: String, pem: String, salt: [u8; 16], name: Option<String>) -> Arc<Notify> {
+		let pin_notify = Arc::new(Notify::new());
+		if let Ok(mut inner) = self.pending_clients.write() {
+			inner.insert(
+				id.clone(),
+				PendingClient {
+					id,
+					name,
+					pem,
+					salt,
+					pin_notify: pin_notify.clone(),
+					key: None,
+					server_secret: None,
+					server_challenge: None,
+					client_hash: None,
+				},
+			);
+		} else {
+			tracing::error!("RwLock poisoned inserting pending client");
+		}
+		self.pending_changed.notify_waiters();
+		pin_notify
 	}
 
 	pub fn persistent_state(&self) -> &PersistentState {
@@ -81,15 +141,7 @@ impl ClientManager {
 		self.state.has_paired_cert(fingerprint.to_string())
 	}
 
-	pub(crate) fn start_pairing(&self, pending_client: PendingClient) -> Result<(), ()> {
-		let mut inner = self.pending_clients.write().map_err(|poison| {
-			tracing::error!("RwLock poisoned: {poison}");
-		})?;
-		inner.insert(pending_client.id.clone(), pending_client);
-		Ok(())
-	}
-
-	pub(crate) fn register_pin(&self, id: &str, pin: &str) -> Result<(), ()> {
+	pub fn register_pin(&self, id: &str, pin: &str) -> Result<(), ()> {
 		let mut inner = self.pending_clients.write().map_err(|poison| {
 			tracing::error!("RwLock poisoned: {poison}");
 		})?;
@@ -99,6 +151,8 @@ impl ClientManager {
 		let key = create_key(&client.salt, pin).map_err(|e| tracing::warn!("Failed to create client key: {e}"))?;
 		client.key = Some(key);
 		client.pin_notify.notify_waiters();
+		drop(inner);
+		self.pending_changed.notify_waiters();
 		Ok(())
 	}
 
@@ -145,8 +199,11 @@ impl ClientManager {
 		let mut challenge_response_decrypted = challenge_response_hash.to_vec();
 		challenge_response_decrypted.extend(server_challenge);
 
-		aes_encrypt_ecb(&challenge_response_decrypted, key)
-			.map_err(|e| tracing::warn!("Failed to encrypt client challenge response: {e}"))
+		let response = aes_encrypt_ecb(&challenge_response_decrypted, key)
+			.map_err(|e| tracing::warn!("Failed to encrypt client challenge response: {e}"))?;
+		drop(inner);
+		self.pending_changed.notify_waiters();
+		Ok(response)
 	}
 
 	pub(crate) fn server_challenge_response(&self, id: &str, challenge_response: Vec<u8>) -> Result<Vec<u8>, ()> {
@@ -178,6 +235,8 @@ impl ClientManager {
 			.map_err(|e| tracing::warn!("Failed to sign server secret: {e}"))?;
 		pairing_secret.extend(signed);
 
+		drop(inner);
+		self.pending_changed.notify_waiters();
 		Ok(pairing_secret)
 	}
 
@@ -208,6 +267,11 @@ impl ClientManager {
 				.map_err(|_| tracing::warn!("Failed to persist client '{id}'"))?;
 		}
 
+		// Pairing is complete: the client is no longer pending. Remove it so
+		// the on-device UI doesn't keep listing a client that already paired.
+		inner.remove(id);
+		drop(inner);
+		self.pending_changed.notify_waiters();
 		Ok(())
 	}
 }
@@ -343,4 +407,50 @@ fn aes_decrypt_ecb(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
 fn cert_pem_fingerprint(pem: &str) -> Option<String> {
 	let (_, pem_obj) = parse_x509_pem(pem.as_bytes()).ok()?;
 	Some(hex::encode(Sha256::digest(&pem_obj.contents)))
+}
+
+#[cfg(test)]
+mod pending_tests {
+	use super::*;
+
+	fn salt() -> [u8; 16] {
+		[0u8; 16]
+	}
+
+	// `ClientManager::new()` in the real codebase takes the server's cert and
+	// key PEM strings and returns a `Result` (they're only ever stored, never
+	// parsed at construction time, so dummy values are fine here).
+	fn manager() -> ClientManager {
+		ClientManager::new(String::new(), String::new()).expect("construct ClientManager")
+	}
+
+	#[test]
+	fn pending_clients_lists_id_and_name() {
+		let m = manager();
+		m.add_pending("AABB".into(), "pem".into(), salt(), Some("eric-mbp".into()));
+		let listed = m.pending_clients();
+		assert_eq!(listed.len(), 1);
+		assert_eq!(listed[0].id, "AABB");
+		assert_eq!(listed[0].name.as_deref(), Some("eric-mbp"));
+	}
+
+	#[test]
+	fn pending_clients_tolerates_a_missing_name() {
+		let m = manager();
+		m.add_pending("CCDD".into(), "pem".into(), salt(), None);
+		assert_eq!(m.pending_clients()[0].name, None);
+	}
+
+	#[tokio::test]
+	async fn adding_a_pending_client_signals_a_change() {
+		let m = manager();
+		let notify = m.pending_changed();
+		let waiter = tokio::spawn(async move { notify.notified().await });
+		tokio::task::yield_now().await;
+		m.add_pending("EEFF".into(), "pem".into(), salt(), None);
+		tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+			.await
+			.expect("pending_changed did not fire within 1s")
+			.unwrap();
+	}
 }
