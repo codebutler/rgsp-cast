@@ -6,6 +6,7 @@
 //! top of them.
 
 pub mod bitstream;
+pub mod framebuffer;
 pub mod geometry;
 pub mod vendor_abi;
 pub mod vendor_lib;
