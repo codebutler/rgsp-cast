@@ -445,6 +445,9 @@ fn run_audio(pcm_tx: Option<mpsc::Sender<Vec<i16>>>) -> anyhow::Result<()> {
 
     let mut capture = LoopbackCapture::open(LOOPBACK_CAPTURE_DEVICE)?;
     let samples = PERIOD_FRAMES * CHANNELS as usize;
+    let mut last_audio_log = std::time::Instant::now();
+    let mut loudest: u16 = 0;
+    let mut periods: u32 = 0;
 
     loop {
         let mut buf = vec![0i16; samples];
@@ -455,6 +458,23 @@ fn run_audio(pcm_tx: Option<mpsc::Sender<Vec<i16>>>) -> anyhow::Result<()> {
                 anyhow::bail!("loopback capture returned no frames");
             }
             filled += frames;
+        }
+
+        // Is there actually sound in what we captured? The loopback data path
+        // has no automated coverage (see the note at the top of audio.rs: an
+        // in-process test read all zeros while aplay->arecord through the same
+        // cable was fine), so report the peak amplitude periodically. Silence
+        // here means the capture side is not receiving the game's audio;
+        // non-zero here means the problem is downstream, in Opus or the
+        // client's audio stream.
+        let peak = buf.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        loudest = loudest.max(peak);
+        periods += 1;
+        if last_audio_log.elapsed() >= std::time::Duration::from_secs(2) {
+            tracing::info!("audio: {periods} periods captured, peak amplitude {loudest}");
+            last_audio_log = std::time::Instant::now();
+            loudest = 0;
+            periods = 0;
         }
 
         pcm_tx

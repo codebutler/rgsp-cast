@@ -73,7 +73,17 @@ impl LoopbackCapture {
                 .context(format!("setting rate to {} Hz", SAMPLE_RATE))?;
             hwp.set_period_size_near(PERIOD_FRAMES as i64, ValueOr::Nearest)
                 .context("setting period size")?;
-            hwp.set_buffer_size_near((PERIOD_FRAMES * 4) as i64)
+            // Four periods is 20 ms of slack at 48 kHz, and this CPU is busy
+            // capturing and encoding video on the same cores: any scheduling
+            // hiccup longer than that overruns the capture, which costs a
+            // prepare()/start() stream reset. Sustained, that is not glitchy
+            // audio, it is no usable audio at all - the log fills with
+            // "audio buffer overrun ... recovering" every few tens of ms.
+            // Deeper buffer, same 5 ms period: reads stay small and prompt,
+            // but jitter has somewhere to go. This costs nothing in latency
+            // that matters, because we still consume every period as it
+            // arrives; it only bounds how far behind we may briefly fall.
+            hwp.set_buffer_size_near((PERIOD_FRAMES * 16) as i64)
                 .context("setting buffer size")?;
             pcm.hw_params(&hwp)?;
         }
@@ -150,10 +160,15 @@ impl LoopbackCapture {
                     // rather than tearing down the stream.
                     if e.errno() == libc::EPIPE {
                         self.overrun_count += 1;
-                        warn!(
-                            "audio buffer overrun #{}: recovering",
-                            self.overrun_count
-                        );
+                        // Log the first few, then every 500th: an overrun
+                        // storm used to emit thousands of identical lines,
+                        // which buried the video diagnostics next to them.
+                        if self.overrun_count <= 3 || self.overrun_count % 500 == 0 {
+                            warn!(
+                                "audio buffer overrun #{}: recovering",
+                                self.overrun_count
+                            );
+                        }
                         self.pcm.prepare()?;
                         self.pcm.start()?;
                         continue;

@@ -382,7 +382,14 @@ impl VideoStream {
 
 		// Packet channel, produced by the packetize loop below and consumed
 		// by the packet handler that owns the socket.
-		let (packet_tx, packet_rx) = mpsc::channel::<ShardBatch>(128);
+		// Deliberately shallow. This is live video: a deep queue does not
+		// smooth anything, it just adds latency, because a batch that waits
+		// here is a frame the viewer sees late and would rather never have
+		// seen. At 60 fps the original 128 slots were over two seconds of
+		// buffered video. Keeping it to a few frames means backpressure
+		// reaches the capture loop instead, which drops to the next frame
+		// deadline rather than replaying a stale backlog.
+		let (packet_tx, packet_rx) = mpsc::channel::<ShardBatch>(3);
 
 		// Spawn packet handler — gated behind start_notify.
 		spawn_handle_video_packets(packet_rx, socket, start_notify.clone(), stop.clone());

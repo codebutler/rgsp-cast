@@ -383,6 +383,15 @@ struct rgsp_capture {
     int              in_fmt, rgb_in;
 
     /* Annex-B output, reused across frames; grows on demand. */
+    /* Pillarbox geometry: the panel image is copied into a padded input
+     * buffer whose aspect ratio matches the destination, so the VE's scale to
+     * the negotiated size preserves proportions instead of stretching. When
+     * no padding is needed these are the panel's own dimensions. */
+    unsigned       pad_w, pad_h;      /* padded input surface, in pixels     */
+    unsigned       pad_x, pad_y;      /* where the panel image sits in it    */
+    int            padded;            /* non-zero when bars actually exist   */
+    int            bars_cleared;      /* the black bars are painted once     */
+
     unsigned char *out_buf;
     size_t         out_cap, out_len;
 
@@ -690,6 +699,36 @@ rgsp_capture *rgsp_capture_open_scaled_ex(int width, int height,
     }
 
     c->w = w; c->h = h; c->bpp = bpp; c->pitch = pitch;
+
+    /* Pillarbox/letterbox: the VE stretches input geometry to destination
+     * geometry with no regard for aspect ratio, and GameStream requires the
+     * stream to be exactly the size the client negotiated - so the padding
+     * has to happen on the input side. Grow the input surface to the
+     * destination's aspect ratio, centre the panel image in it, and leave the
+     * remainder black. 720x480 (3:2) into 1280x720 (16:9) gives 1080x480 with
+     * 180px bars either side, which the VE then scales evenly.
+     *
+     * Only widening or heightening, never cropping: the whole panel is always
+     * visible. 16-alignment keeps the VE happy. */
+    c->pad_w = w; c->pad_h = h; c->pad_x = 0; c->pad_y = 0; c->padded = 0;
+    if (dst_w > 0 && dst_h > 0 && (unsigned)dst_w * h != (unsigned)dst_h * w) {
+        if ((unsigned)dst_w * h > (unsigned)dst_h * w) {
+            unsigned want = (unsigned)(((unsigned long long)h * dst_w) / dst_h);
+            /* Nearest 16, not next-16: the alignment error becomes residual
+             * aspect distortion, and rounding to nearest halves it. */
+            c->pad_w = (want + 8) & ~15u;
+            if (c->pad_w < w) c->pad_w = (w + 15) & ~15u;
+        } else {
+            unsigned want = (unsigned)(((unsigned long long)w * dst_h) / dst_w);
+            c->pad_h = (want + 8) & ~15u;
+            if (c->pad_h < h) c->pad_h = (h + 15) & ~15u;
+        }
+        c->pad_x = (c->pad_w - w) / 2;
+        c->pad_y = (c->pad_h - h) / 2;
+        c->padded = 1;
+        LOG("pillarbox: %ux%u panel centred in a %ux%u surface for a %dx%d target",
+            w, h, c->pad_w, c->pad_h, dst_w, dst_h);
+    }
     c->frame_bytes = (size_t)pitch * h;
     c->fb_buf = malloc(c->frame_bytes);
     if (!c->fb_buf) { set_error("out of memory for framebuffer copy"); goto fail; }
@@ -754,10 +793,12 @@ rgsp_capture *rgsp_capture_open_scaled_ex(int width, int height,
      * cannot read (VideoEncGetParameter hands back a VE bus address), and the
      * stream is undecodable without hardcoding them per resolution. */
     bcfg.bEncH264Nalu = 1;
-    bcfg.nInputWidth = w; bcfg.nInputHeight = h;
-    bcfg.nDstWidth   = dst_w > 0 ? (unsigned)dst_w : w;
-    bcfg.nDstHeight  = dst_h > 0 ? (unsigned)dst_h : h;
-    bcfg.nStride     = stride_bytes ? pitch : w;
+    bcfg.nInputWidth = c->pad_w; bcfg.nInputHeight = c->pad_h;
+    bcfg.nDstWidth   = dst_w > 0 ? (unsigned)dst_w : c->pad_w;
+    bcfg.nDstHeight  = dst_h > 0 ? (unsigned)dst_h : c->pad_h;
+    /* Stride describes the padded surface we hand the VE, not /dev/fb0's
+     * pitch: once padding exists the two differ and the rows would shear. */
+    bcfg.nStride     = c->padded ? c->pad_w : (stride_bytes ? pitch : w);
     bcfg.eInputFormat = (VENC_PIXEL_FMT)in_fmt;
     bcfg.memops = c->memops; bcfg.veOpsS = veops; bcfg.pVeOpsSelf = NULL;
 
@@ -768,8 +809,8 @@ rgsp_capture *rgsp_capture_open_scaled_ex(int width, int height,
     memset(&bp, 0, sizeof bp);
     c->rgb_in = (in_fmt >= VENC_PIXEL_ARGB && in_fmt <= VENC_PIXEL_BGRA);
     bp.nBufferNum = 1;
-    bp.nSizeY     = c->rgb_in ? w * h * 4 : w * h;
-    bp.nSizeC     = c->rgb_in ? 0         : w * h / 2;
+    bp.nSizeY     = c->rgb_in ? c->pad_w * c->pad_h * 4 : c->pad_w * c->pad_h;
+    bp.nSizeC     = c->rgb_in ? 0                       : c->pad_w * c->pad_h / 2;
     if (p_AllocInputBuffer(c->enc, &bp) != 0) { set_error("AllocInputBuffer failed"); goto fail; }
     c->buffers_alloced = 1;
 
@@ -879,7 +920,22 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
     const uint8_t *fb_src = c->fb_buf;
 
     long long t0 = now_ns();
-    if (c->rgb_in) {
+    if (c->rgb_in && c->padded) {
+        /* Row-by-row into the centre of the padded surface. The bars are
+         * blacked once per buffer below, not per frame - with nBufferNum = 1
+         * the VE hands back the same allocation every time, so anything
+         * outside the image area stays as we left it. */
+        const size_t row_bytes = (size_t)c->w * 4;
+        const size_t dst_pitch = (size_t)c->pad_w * 4;
+        if (!c->bars_cleared) {
+            memset(c->inbuf._virY, 0, dst_pitch * c->pad_h);
+            c->bars_cleared = 1;
+        }
+        unsigned char *dst = c->inbuf._virY + (size_t)c->pad_y * dst_pitch
+                                            + (size_t)c->pad_x * 4;
+        for (unsigned y = 0; y < c->h; y++)
+            memcpy(dst + (size_t)y * dst_pitch, fb_src + (size_t)y * c->pitch, row_bytes);
+    } else if (c->rgb_in) {
         /* No conversion: the VE ingests the framebuffer format as-is.
          * Still one copy, because the encoder reads from ION memory. */
         memcpy(c->inbuf._virY, fb_src, c->frame_bytes);
@@ -895,7 +951,10 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
      * device's own screen must stay untouched. Only meaningful for the BGRA
      * passthrough path; see draw_marker()'s comment. */
     if (c->overlay && c->rgb_in)
-        draw_marker(c->inbuf._virY, (int)c->w, (int)c->h, (int)c->pitch);
+        draw_marker(c->inbuf._virY + (size_t)c->pad_y * (size_t)c->pad_w * 4
+                                   + (size_t)c->pad_x * 4,
+                    (int)c->w, (int)c->h,
+                    c->padded ? (int)(c->pad_w * 4) : (int)c->pitch);
 
     c->inbuf.nPts          = (long long)c->frames * (1000000LL / c->fps);
     c->inbuf.bIsFirstFrame = (c->frames == 0);

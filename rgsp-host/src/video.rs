@@ -182,6 +182,7 @@ impl VideoStream {
         }
 
         let mut frame_number: u64 = 0;
+        let mut last_latency_log = Instant::now();
 
         // A keyframe at the negotiated resolution is one to two orders of
         // magnitude larger than a P-frame (measured: 85 KB / 75 packets at
@@ -211,6 +212,7 @@ impl VideoStream {
 
             // A failure from `Capture::next` is terminal: the capture is
             // dead and must simply be dropped, not retried.
+            let capture_started = Instant::now();
             let frame = capture.next()?;
 
             // Frame numbers on the wire are 1-based. Upstream moonshine's
@@ -223,12 +225,26 @@ impl VideoStream {
             frame_number += 1;
             let rtp_timestamp = rtp_timestamp_for(frame_number, self.cfg.fps);
 
+            // Host-side latency budget, sampled once a second: how long the
+            // frame spent being captured and encoded, and how long the send
+            // below then blocked because the packet queue was full. If both
+            // are small, the delay the viewer sees is in the network or the
+            // client's own buffering, not here.
+            let encode_ms = capture_started.elapsed().as_secs_f32() * 1000.0;
+            let send_started = Instant::now();
+
             send(EncodedFrameRef {
                 data: frame.data,
                 is_keyframe: frame.is_keyframe,
                 frame_number: frame_number as u32,
                 rtp_timestamp,
             })?;
+
+            let blocked_ms = send_started.elapsed().as_secs_f32() * 1000.0;
+            if last_latency_log.elapsed() >= Duration::from_secs(1) {
+                tracing::info!("latency: encode {encode_ms:.1} ms, queue wait {blocked_ms:.1} ms");
+                last_latency_log = Instant::now();
+            }
         }
     }
 }
