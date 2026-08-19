@@ -230,6 +230,13 @@ impl Service {
     /// daemon". A pid on its own is not enough: PIDs get recycled, so a
     /// pidfile surviving a crash can end up naming an unrelated live
     /// process.
+    ///
+    /// Known race: this probe transiently *acquires* the lock on a stale
+    /// pidfile before releasing it. If `rgsp-host`'s own non-blocking
+    /// `PidFile::acquire` happens to run in that microseconds-wide window —
+    /// a fresh daemon starting up concurrently with a `stop()` against a
+    /// stale pidfile — it would see the lock taken and abort its own
+    /// startup, misreporting "already running." Narrow and not handled.
     fn pidfile_lock_is_held(pidfile: &Path) -> anyhow::Result<bool> {
         let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(pidfile) {
             Ok(f) => f,
