@@ -1,0 +1,21 @@
+README.md
+  s_5335a78adb4cf1::t_5f9ff9818615f5 35,70-71,115-364,369-370,408,410,412-418,420,429-431,433-436,438-441,443-447,449-451,453-455,457-459,461,476-477,481-489,500,517-518,528-530,578-580,582-583,594,596-661
+  s_5335a78adb4cf1::t_4a6583b243fab4 662
+  s_5335a78adb4cf1::t_a42141f71847df 5,26,30-31,33,675-676,682,688-692,704
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8279e6df31905a0d27cc0af12c033e00726af5f9",
+  "prompts": {},
+  "sessions": {
+    "s_5335a78adb4cf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "26db82e2-b784-45af-a7b4-f0771a3db06b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
