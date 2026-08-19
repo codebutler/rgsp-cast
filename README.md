@@ -695,8 +695,8 @@ Do not retry these without new information.
 ### Further reading
 
 Implementations worth reading while working on this. **Reading is not the
-licensed act, copying is** — these are the
-places to look when a client does something the code here cannot explain.
+licensed act, copying is** — these are the places to look when a client does
+something the code here cannot explain.
 
 **Protocol**
 
