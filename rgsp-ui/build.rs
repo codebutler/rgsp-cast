@@ -4,13 +4,12 @@ use std::{
 };
 
 fn main() {
-    // FIXED_SCALE is a compile-time 2 only on h700; on tg5040 it is a runtime
-    // ternary. A wrong constant is worse than a missing one, so refuse to build
-    // anywhere else rather than silently scaling by the wrong factor.
-    println!("cargo:rerun-if-env-changed=RGSP_PLATFORM");
-    let platform = env::var("RGSP_PLATFORM").unwrap_or_else(|_| "h700".into());
-    assert_eq!(platform, "h700", "rgsp-ui supports only PLATFORM=h700");
-
+    // The h700-only invariant is enforced in src/sys.rs as
+    // `const _: () = assert!(FIXED_SCALE == 2);`, not here. An RGSP_PLATFORM
+    // check would have to either default to "h700" — validating nothing, since
+    // no caller sets the variable — or demand every caller set it, which is a
+    // guard that only holds while operators cooperate. Asserting on the
+    // constant the vendored headers actually produce needs neither.
     let vendor = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor");
     let root = vendor.join("nextui");
     let common = root.join("common");
@@ -136,7 +135,11 @@ fn build_msettings(common: &Path, plat: &Path, tinyalsa: &Path, out: &Path) {
             // needs; nothing here plays PCM audio.
             tinyalsa.join("src/mixer.c"),
         ])
-        .args(["-ldl", "-lrt", "-lm"]);
+        // --no-undefined turns a missing or renamed symbol into a link error
+        // here. Without it nothing would catch one: this .so is never loaded
+        // (the device loads its own), so an unresolved symbol would surface
+        // only on real hardware, in the component that must not wedge.
+        .args(["-ldl", "-lrt", "-lm", "-Wl,--no-undefined"]);
 
     let status = cmd
         .status()

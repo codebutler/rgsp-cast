@@ -8,6 +8,14 @@
 
 include!(concat!(env!("OUT_DIR"), "/nextui.rs"));
 
+// FIXED_SCALE is a compile-time 2 on h700 and a runtime ternary on tg5040.
+// The scale helpers below are only correct for the former, so refuse to
+// compile against headers that say otherwise. This fires from the vendored
+// headers themselves: no environment variable to set, nothing to forget, and
+// it fails the build rather than a user's device. (On tg5040 headers bindgen
+// would not emit FIXED_SCALE at all, which fails the build even earlier.)
+const _: () = assert!(FIXED_SCALE == 2);
+
 // SCALE1..SCALE4 are function-like macros, so they do not survive
 // preprocessing and bindgen cannot emit them. FIXED_SCALE is an object-like
 // macro with a constant value on h700, so it does come across — which leaves
