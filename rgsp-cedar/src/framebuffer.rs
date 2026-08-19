@@ -106,6 +106,31 @@ struct FbFixScreeninfo {
 const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
 const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
 
+// These structs are transcribed by hand, from memory, with no bindgen safety
+// net - so a misplaced field would otherwise fail silently, yielding garbage
+// geometry rather than a build error. Pin the sizes and the offset of every
+// field the code actually reads.
+//
+// Values measured by compiling a probe against the real <linux/fb.h> in an
+// arm64 ubuntu:22.04 container (two independent probes agree): if a future
+// toolchain or target changes these, the build breaks here instead of the
+// geometry silently going wrong on device.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<FbVarScreeninfo>() == 160);
+    assert!(offset_of!(FbVarScreeninfo, xres) == 0);
+    assert!(offset_of!(FbVarScreeninfo, yres) == 4);
+    assert!(offset_of!(FbVarScreeninfo, xres_virtual) == 8);
+    assert!(offset_of!(FbVarScreeninfo, yres_virtual) == 12);
+    assert!(offset_of!(FbVarScreeninfo, yoffset) == 20);
+    assert!(offset_of!(FbVarScreeninfo, bits_per_pixel) == 24);
+
+    assert!(size_of::<FbFixScreeninfo>() == 80);
+    assert!(offset_of!(FbFixScreeninfo, smem_start) == 16);
+    assert!(offset_of!(FbFixScreeninfo, smem_len) == 24);
+    assert!(offset_of!(FbFixScreeninfo, line_length) == 48);
+};
+
 /// The geometry `Framebuffer::open` read from the panel, exposed for callers
 /// that need it (allocation sizing, logging, matching against a requested
 /// destination size).
@@ -164,13 +189,15 @@ impl Framebuffer {
         // sizeof(FbVarScreeninfo)/sizeof(FbFixScreeninfo) bytes at the
         // pointer given, and both structs are repr(C) with kernel-matching
         // layout.
-        let (rv, rf) = unsafe {
-            (
-                libc::ioctl(fd, FBIOGET_VSCREENINFO, vinfo.as_mut_ptr()),
-                libc::ioctl(fd, FBIOGET_FSCREENINFO, finfo.as_mut_ptr()),
-            )
+        //
+        // Short-circuits like the C: `ioctl(..VSCREENINFO..) < 0 ||
+        // ioctl(..FSCREENINFO..) < 0` never issues the second ioctl once the
+        // first has failed.
+        let ok = unsafe {
+            libc::ioctl(fd, FBIOGET_VSCREENINFO, vinfo.as_mut_ptr()) == 0
+                && libc::ioctl(fd, FBIOGET_FSCREENINFO, finfo.as_mut_ptr()) == 0
         };
-        if rv < 0 || rf < 0 {
+        if !ok {
             bail!(
                 "FBIOGET_*SCREENINFO: {}",
                 std::io::Error::last_os_error()
