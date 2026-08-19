@@ -1,4 +1,4 @@
-bin/
+/bin/
 vendor-libs/
 .firmware-cache/
 dist/
@@ -10,3 +10,4 @@ librgspcast.a
 .DS_Store
 vendor/moonshine/moonshine-core/Cargo.lock
 docs/superpowers/
+.superpowers/

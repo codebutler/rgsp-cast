@@ -35,14 +35,6 @@ bin/test-capture-api: tests/test_capture_api.c librgspcast.a
 		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
 		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
 
-# Includes src/rgsp-cast.c directly to reach the vendor struct definitions and
-# the dlsym'd pointers, so it does not link the archive.
-bin/test-vendor-overspill: tests/test_vendor_overspill.c src/rgsp-cast.c
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< -ldl'
-
 bin/test-reopen-leak: tests/test_reopen_leak.c librgspcast.a
 	@mkdir -p bin
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \

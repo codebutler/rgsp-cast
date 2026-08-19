@@ -1,0 +1,19 @@
+[package]
+name = "rgsp-cedar"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rgsp_cedar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rgsp-cast"
+path = "src/bin/rgsp-cast.rs"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+libloading = "0.8"
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
