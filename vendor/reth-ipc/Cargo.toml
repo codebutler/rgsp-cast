@@ -1,0 +1,41 @@
+# Vendored from paradigmxyz/reth, crates/rpc/ipc, at commit
+# df69a6ac99af6e2f29461a5695b0b7df36919627.
+#
+# jsonrpsee has no IPC transport of its own (paritytech/jsonrpsee#5, open since
+# 2019); this crate is the community answer and is standalone — no reth-* crate
+# appears in its runtime dependencies. It is not published to crates.io, hence
+# vendoring rather than a dependency.
+#
+# Upstream inherits every dependency from reth's workspace; the versions below
+# are those pinned by reth at that commit. The only source change is in
+# src/server/mod.rs, where the reth-tracing test helper is replaced by a local
+# no-op so no reth-* crate is needed to build the tests.
+[package]
+name = "reth-ipc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/paradigmxyz/reth"
+description = "IPC transport for jsonrpsee (vendored from reth)"
+publish = false
+
+[dependencies]
+futures = "0.3"
+tokio = { version = "1.52.3", features = ["net", "time", "rt-multi-thread"] }
+tokio-util = { version = "0.7.4", features = ["codec"] }
+tokio-stream = "0.1.11"
+pin-project = "1.1.12"
+tower = "0.5"
+jsonrpsee = { version = "0.26.0", default-features = false, features = ["server", "async-client"] }
+serde_json = "1.0"
+tracing = "0.1"
+bytes = "1.11.1"
+thiserror = "2.0.0"
+futures-util = "0.3"
+interprocess = { version = "2.4.2", features = ["tokio"] }
+
+[dev-dependencies]
+tokio-stream = { version = "0.1.11", features = ["sync"] }
+serde = "1.0"
+rand = "0.9"
