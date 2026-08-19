@@ -20,3 +20,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bindgen = "0.72"
 cc = "1"
 pkg-config = "0.3"
+
+[dev-dependencies]
+# Test-only: the client-side "async-client"/"macros" features above are
+# enough for the real client code, but the integration test also stands up a
+# server to talk to (mirroring rgsp-host/tests/control.rs), which needs
+# jsonrpsee's server feature and a multi-thread tokio runtime so background
+# server tasks keep running without the test thread continuously polling.
+jsonrpsee = { version = "0.26.0", default-features = false, features = ["server", "macros", "async-client"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

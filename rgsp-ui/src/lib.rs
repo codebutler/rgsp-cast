@@ -3,5 +3,6 @@
 //! [`sys`] is the raw bindgen layer; [`ui::Ui`] is the safe wrapper screens
 //! are built on.
 
+pub mod rpc;
 pub mod sys;
 pub mod ui;
