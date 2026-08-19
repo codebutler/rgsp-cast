@@ -300,8 +300,28 @@ fn pending_entries(client_manager: &ClientManager) -> Vec<PendingEntry> {
     client_manager
         .pending_clients()
         .into_iter()
-        .map(|p| PendingEntry { id: p.id, name: p.name })
+        .map(|p| PendingEntry { id: p.id, name: normalize_devicename(p.name) })
         .collect()
+}
+
+/// Every Moonlight client hardcodes `devicename=roth` on every pairing
+/// request — it is not the client's name. Confirmed against both upstream
+/// clients' pairing code: moonlight-qt's `app/backend/nvpairingmanager.cpp`
+/// sends `devicename=roth&updateState=1&...` on all five pairing POSTs, and
+/// moonlight-android's `NvHTTP.java` sends
+/// `"pair", "devicename=roth&updateState=1&" + ...`. `roth` is a legacy
+/// GameStream constant left over from an old NVIDIA SHIELD codename, so
+/// showing it in the pairing UI would read as a name when it is really a
+/// protocol artifact shared by every client.
+///
+/// Fold it back to `None` here so the UI falls back to its short-id
+/// display, same as any other pending client that sent no name. Keep
+/// capturing `devicename` upstream in moonshine (do not remove it there) —
+/// a non-Moonlight client could someday send something genuinely useful,
+/// and only the literal constant is normalized away, not any broader
+/// pattern.
+fn normalize_devicename(name: Option<String>) -> Option<String> {
+    name.filter(|n| n != "roth")
 }
 
 fn spawn_signal_handler(shutdown: ShutdownManager<ShutdownReason>) {
@@ -642,4 +662,27 @@ fn load_config(userdata: &Path) -> anyhow::Result<Config> {
 
     Config::load_or_create(&path)
         .map_err(|()| anyhow::anyhow!("failed to load the configuration at {}", path.display()))
+}
+
+#[cfg(test)]
+mod pending_entries_tests {
+    use super::normalize_devicename;
+
+    #[test]
+    fn roth_placeholder_is_dropped() {
+        assert_eq!(normalize_devicename(Some("roth".to_string())), None);
+    }
+
+    #[test]
+    fn a_real_name_is_kept() {
+        assert_eq!(
+            normalize_devicename(Some("Steam Deck".to_string())),
+            Some("Steam Deck".to_string())
+        );
+    }
+
+    #[test]
+    fn no_name_stays_none() {
+        assert_eq!(normalize_devicename(None), None);
+    }
 }
