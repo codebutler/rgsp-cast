@@ -141,8 +141,13 @@ impl VendorLibs {
 ///
 /// The pointers stay valid because the `Library` handles live in the same
 /// struct and that struct is leaked into a `OnceLock` for the process
-/// lifetime — nothing ever calls `dlclose`. Dropping a `VendorLibs` would
-/// dangle every pointer in it; there is deliberately no path that does.
+/// lifetime — nothing ever calls `dlclose` on the instance that wins the
+/// `OnceLock`. `get_or_init` does have a benign race where two threads each
+/// build a `VendorLibs` and the loser's is dropped, running `dlclose` on
+/// libraries the winner also opened; that's harmless because the dynamic
+/// linker refcounts each `dlopen`d path, so the winner's own handles keep
+/// them mapped. Dropping a `VendorLibs` would dangle every pointer in it, so
+/// nothing after `load()` is allowed to see anything but the survivor.
 unsafe fn required<T: Copy>(lib: &Library, name: &[u8]) -> Result<T> {
     let sym: Symbol<T> = lib.get(name).map_err(|_| {
         anyhow!(

@@ -134,6 +134,13 @@ pub struct Capture {
     /// `#[repr(C)]` on this struct is not cosmetic: Rust's default layout
     /// reorders fields freely, which would put live data where the guard is
     /// supposed to be. This is the whole reason the C bug happened.
+    ///
+    /// For the same reason, a `Capture` must never be moved out of its
+    /// `Box` (e.g. `let owned = *cap;`) once the vendor libraries hold
+    /// pointers into it — that would relocate `inbuf` out from under them.
+    /// Nothing in this crate does that; it compiles even for a `Drop` type,
+    /// so it stays a rule for callers rather than something the type system
+    /// stops.
     inbuf: VencInputBuffer,
     used: VencInputBuffer,
     /// Filled with 0xAA, never zeroed: most of what the vendor writes past
@@ -142,9 +149,12 @@ pub struct Capture {
     _vendor_guard: [u8; 4096],
 }
 
-/// `Capture` can be sent to other threads: the single-instance guard
-/// (`CAPTURE_OPEN`) means there is never a second one to race with over the
-/// process-global vendor state the raw pointers refer to.
+/// `Capture` can be sent to other threads: it is `!Sync` (the raw pointers
+/// see to that), so only one thread ever holds `&mut Capture` at a time, and
+/// the vendor libraries have no demonstrated thread affinity — the C daemon
+/// already relied on this, moving capture onto a streaming thread. The
+/// `CAPTURE_OPEN` guard is about there being only one `Capture` at all; it is
+/// not what makes handing that one instance to another thread sound.
 unsafe impl Send for Capture {}
 
 /// `GetOneBitstreamFrame()` fills a `VencOutputBuffer`, so it is vendor-written
@@ -164,6 +174,27 @@ unsafe impl Send for Capture {}
 struct GuardedOutputBuffer {
     ob: VencOutputBuffer,
     guard: [u8; 256],
+}
+
+/// The pure half of the RGB-pitch check: rejects a panel whose stride the
+/// non-padded RGB copy path cannot ingest. Split out from `init` so it can be
+/// unit-tested without a device, following `validate_geometry`.
+///
+/// The non-padded RGB copy in `next` writes `frame_bytes = pitch * h` bytes
+/// into a `pad_w*pad_h*4 = w*h*4` vendor allocation (padding off means the
+/// padded surface is the panel itself). Those sizes agree only while
+/// `pitch == w*4`; every other pixel format goes through the NV12 convert
+/// path instead, and padding always sizes to its own surface, so neither
+/// needs this check.
+fn validate_rgb_pitch(is_rgb: bool, padded: bool, pitch: u32, w: u32) -> Result<()> {
+    if is_rgb && !padded && pitch != w * 4 {
+        bail!(
+            "framebuffer pitch {pitch} does not match width*4 ({}) with padding off; \
+             the non-padded RGB copy assumes they match and would overrun the vendor buffer",
+            w * 4
+        );
+    }
+    Ok(())
 }
 
 fn now_ns() -> i64 {
@@ -321,6 +352,12 @@ impl Capture {
                 p.pad_w, p.pad_h
             );
         }
+
+        let is_rgb = matches!(
+            self.in_fmt,
+            VencPixelFmt::Argb | VencPixelFmt::Rgba | VencPixelFmt::Abgr | VencPixelFmt::Bgra
+        );
+        validate_rgb_pitch(is_rgb, p.padded, pitch, w)?;
 
         self.frame_bytes = pitch as usize * h as usize;
         self.fb_buf = vec![0u8; self.frame_bytes];
@@ -772,8 +809,10 @@ impl Capture {
         } else if self.rgb_in {
             // No conversion: the VE ingests the framebuffer format as-is.
             // Still one copy, because the encoder reads from ION memory.
-            // SAFETY: the allocation is pad_w*pad_h*4 >= frame_bytes here,
-            // since padding is off and the surface is the panel itself.
+            // SAFETY: frame_bytes (pitch*h) fits the pad_w*pad_h*4 (=w*h*4)
+            // allocation because pitch == w*4 here — `init` rejects opening
+            // when padding is off and the panel's pitch disagrees with that,
+            // so this call site never sees the mismatched case.
             unsafe {
                 std::ptr::copy_nonoverlapping(self.fb_buf.as_ptr(), vir_y, self.frame_bytes)
             };
@@ -961,5 +1000,34 @@ mod tests {
     fn the_guard_fill_is_not_zero() {
         assert_ne!(GUARD_FILL, 0);
         assert_eq!(GUARD_FILL, 0xAA, "the overspill test measures against 0xAA");
+    }
+
+    /// The real panel: 720x480, 32bpp, pitch 2880 = 720*4. Must never be
+    /// rejected — this is the case the check exists to leave untouched.
+    #[test]
+    fn the_real_panel_pitch_passes() {
+        assert!(validate_rgb_pitch(true, false, 2880, 720).is_ok());
+    }
+
+    /// The failure scenario from the finding: a 64-byte-aligned stride (2944)
+    /// on an unpadded RGB frame would overrun the vendor's w*h*4 allocation
+    /// by ~30 KB per frame. Must be rejected at open, not clamped at copy.
+    #[test]
+    fn a_padded_stride_on_the_rgb_path_is_rejected() {
+        assert!(validate_rgb_pitch(true, false, 2944, 720).is_err());
+    }
+
+    /// Padding on means the vendor surface is pad_w*pad_h*4, not w*h*4, so
+    /// the assumption this check protects does not apply.
+    #[test]
+    fn padding_exempts_a_mismatched_pitch() {
+        assert!(validate_rgb_pitch(true, true, 2944, 720).is_ok());
+    }
+
+    /// The NV12 convert path has its own luma/chroma sizing and never takes
+    /// the raw-copy branch this check protects.
+    #[test]
+    fn the_nv12_path_is_unaffected_by_pitch() {
+        assert!(validate_rgb_pitch(false, false, 2944, 720).is_ok());
     }
 }
