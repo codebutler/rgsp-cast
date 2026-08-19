@@ -12,10 +12,19 @@
 //! succeeding is the only authoritative "the daemon is answering", and
 //! connect failing is the only authoritative "it is not" (mirrors the same
 //! design point documented on [`crate::rpc::Control`]).
+//!
+//! The pid itself is likewise not trusted on its own: [`Service::stop`]
+//! confirms it names the daemon by probing the pidfile's `flock(2)` (see
+//! [`Service::pidfile_lock_is_held`]) before signaling, since a pid alone can
+//! have been recycled by an unrelated process after a crashed daemon left
+//! its pidfile behind.
 
+use std::fs::OpenOptions;
 use std::io::ErrorKind;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -91,16 +100,32 @@ impl Service {
     /// than `Command::spawn` directly: the daemon becomes a child of the
     /// short-lived `sh`, not of this process, so it is reparented to init
     /// once `sh` exits instead of staying a zombie-in-waiting under a
-    /// long-running UI process that never calls `wait` on it.
+    /// long-running UI process that never calls `wait` on it. That is the
+    /// full extent of the detachment, matching `launch.sh`: there is no
+    /// `setsid`, so the daemon keeps `sh`'s session and controlling
+    /// terminal. Stdin is still redirected from `/dev/null` (only stdout and
+    /// stderr go to the log) so the daemon can never block reading from a
+    /// terminal that outlives this call.
+    ///
+    /// Checks that `bin` exists and is executable before spawning anything,
+    /// so a broken install (missing or non-executable `rgsp-host`) fails
+    /// immediately with its own message rather than looking identical to "it
+    /// started but never bound the socket" for the full `start_timeout`.
     pub fn start(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.run_dir)
             .with_context(|| format!("creating run dir {}", self.run_dir.display()))?;
 
         let bin = self.pak_dir.join("rgsp-host");
+        let metadata = std::fs::metadata(&bin)
+            .with_context(|| format!("{} does not exist or is not accessible", bin.display()))?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            anyhow::bail!("{} exists but is not executable", bin.display());
+        }
+
         let log = self.run_dir.join("daemon.log");
         let status = Command::new("sh")
             .arg("-c")
-            .arg(r#""$1" >"$2" 2>&1 &"#)
+            .arg(r#""$1" </dev/null >"$2" 2>&1 &"#)
             .arg("sh") // becomes $0 inside the -c script
             .arg(&bin) // $1
             .arg(&log) // $2
@@ -135,6 +160,13 @@ impl Service {
     /// error: there is nothing to signal. A pidfile that exists but doesn't
     /// parse as a pid *is* an error — that's corruption, not "not running",
     /// and silently ignoring it would leave a live daemon signaled never.
+    ///
+    /// Before signaling, confirms the pid is actually the daemon's by
+    /// probing the pidfile's flock (see [`Self::pidfile_lock_is_held`]): a
+    /// pidfile is not proof of identity on its own; the pid it names can
+    /// have been recycled by an unrelated process since the daemon that
+    /// wrote it crashed. Signaling on the pid alone risks SIGTERMing that
+    /// stranger.
     pub fn stop(&self) -> anyhow::Result<()> {
         let pidfile = self.pidfile_path();
         let contents = match std::fs::read_to_string(&pidfile) {
@@ -146,6 +178,16 @@ impl Service {
             .trim()
             .parse()
             .with_context(|| format!("{} does not contain a valid pid: {:?}", pidfile.display(), contents))?;
+
+        if !Self::pidfile_lock_is_held(&pidfile)? {
+            // Nobody holds the lock: the pidfile is stale, whether because
+            // the daemon it named already exited (the kernel drops the
+            // flock the moment the holder exits or crashes) or because it
+            // was never a daemon's pidfile in the first place. Either way
+            // there is nothing here to signal, and `pid` is not trustworthy
+            // enough to try.
+            return Ok(());
+        }
 
         // SAFETY: `kill(2)` with a caller-controlled pid and no other side
         // effects on our own memory; failure is reported through errno.
@@ -173,5 +215,44 @@ impl Service {
             }
             std::thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    /// True if some process currently holds the exclusive `flock(2)` on
+    /// `pidfile` — i.e. the pid it names is the daemon's, not a stale
+    /// leftover. False means *we* were able to grab the lock instead, which
+    /// only happens when no daemon holds it.
+    ///
+    /// This mirrors `rgsp-host`'s own `PidFile::acquire`
+    /// (`rgsp-host/src/daemon.rs`): the daemon takes this same flock for its
+    /// entire lifetime and the kernel releases it automatically on exit or
+    /// crash, so the flock — not the pid's mere liveness — is what
+    /// authoritatively answers "is the process named here really the
+    /// daemon". A pid on its own is not enough: PIDs get recycled, so a
+    /// pidfile surviving a crash can end up naming an unrelated live
+    /// process.
+    fn pidfile_lock_is_held(pidfile: &Path) -> anyhow::Result<bool> {
+        let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(pidfile) {
+            Ok(f) => f,
+            // Vanished between our caller reading its contents and this
+            // probe: nothing to hold a lock on any more.
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e).with_context(|| format!("opening {} to probe its lock", pidfile.display())),
+        };
+
+        // SAFETY: `flock(2)` on an fd we just opened ourselves; failure is
+        // reported through errno, and no other side effects on our memory.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            // We got it, so nobody else had it. Release immediately -- this
+            // call only probes ownership, it doesn't claim the pidfile.
+            // SAFETY: same fd, still open, still ours.
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            return Ok(false);
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.kind() == ErrorKind::WouldBlock {
+            return Ok(true);
+        }
+        Err(err).with_context(|| format!("probing the lock on {}", pidfile.display()))
     }
 }
