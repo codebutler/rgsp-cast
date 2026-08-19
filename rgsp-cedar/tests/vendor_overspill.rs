@@ -8,6 +8,7 @@
 //!
 //! The layout half runs anywhere. The sentinel half needs the device.
 
+use rgsp_cedar::capture::Capture;
 use rgsp_cedar::vendor_abi::*;
 use std::mem::size_of;
 
@@ -30,4 +31,39 @@ fn vendor_struct_sizes_match_the_c_definitions() {
 fn output_buffer_tail_is_256_bytes() {
     let b = VencOutputBuffer::default();
     assert_eq!(b._tail.len(), 256, "measured +0 spill, but the slack is the standing rule");
+}
+
+/// How far past `used` do the vendor libraries write?
+///
+/// The C measured +24 bytes, every frame, from the
+/// AlreadyUsedInputBuffer/ReturnOneAllocInputBuffer pair. Most of that write
+/// is zeroes, which is why it was invisible to a scan for non-zero bytes and
+/// why the guard is filled with 0xAA instead.
+///
+/// Asserts only that the spill stays inside the 4096-byte guard, not that it
+/// is exactly 24: a vendor lib update that widened it should surface as the
+/// hazard it is, not as a test bug. The measured value is reported so a change
+/// is visible in the output.
+#[test]
+fn input_buffer_spill_stays_inside_the_guard() {
+    if !std::path::Path::new("/dev/fb0").exists() {
+        eprintln!("skipping: no /dev/fb0");
+        return;
+    }
+
+    let mut cap = Capture::open(720, 480, 30, 2_000_000).expect("open");
+    for _ in 0..3 {
+        cap.next().expect("frame");
+    }
+
+    let guard = cap.vendor_guard();
+    let spill = guard.iter().rposition(|&b| b != 0xAA).map_or(0, |i| i + 1);
+    eprintln!("vendor spill past `used`: {spill} bytes (C measured 24)");
+
+    assert!(
+        spill < guard.len(),
+        "the vendor libraries wrote past the whole {}-byte guard - anything after \
+         it in the struct is being corrupted",
+        guard.len()
+    );
 }

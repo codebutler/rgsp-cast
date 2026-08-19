@@ -6,6 +6,8 @@
 //! top of them.
 
 pub mod bitstream;
+pub mod capture;
+pub mod convert;
 pub mod framebuffer;
 pub mod geometry;
 pub mod vendor_abi;
