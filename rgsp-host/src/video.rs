@@ -1,6 +1,5 @@
 use crate::capture::Capture;
 use anyhow::{anyhow, Result};
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,10 +30,12 @@ pub struct VideoConfig {
     pub height: u32,
     pub fps: u32,
     pub bitrate: u32,
-    pub packet_size: usize,
-    pub fec_percentage: u8,
-    pub minimum_fec_packets: u32,
-    pub client_addr: SocketAddr,
+    // No packet_size / fec_percentage / minimum_fec_packets / client_addr here:
+    // packetizing and the sockets belong to moonshine-core, which takes those
+    // from `config.stream.video` and the RTSP-negotiated context. They used to
+    // be carried here as well, written once and never read - and the stale
+    // `fec_percentage: 0` in particular read as "FEC is off" when the live
+    // value is 20.
 }
 
 /// One encoded frame plus the metadata moonshine-core's packetizer needs.

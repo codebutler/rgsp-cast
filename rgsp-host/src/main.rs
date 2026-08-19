@@ -8,7 +8,7 @@
 //!   of the Cedar VE, raw PCM out of the loopback.
 //! - This file is the only place the two meet.
 
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 
 use async_shutdown::ShutdownManager;
@@ -383,12 +383,6 @@ async fn session_pump(
             height: context.height,
             fps,
             bitrate: context.bitrate as u32,
-            packet_size: context.packet_size,
-            fec_percentage: 0,
-            minimum_fec_packets: context.minimum_fec_packets,
-            // Packetizing moved into moonshine-core, which owns the sockets;
-            // nothing in `VideoStream` sends to this address.
-            client_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
         });
         let control = tokio::spawn(forward_encoder_control(
             control_rx,
