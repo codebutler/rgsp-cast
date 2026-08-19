@@ -2059,6 +2059,7 @@ dependencies = [
  "bindgen",
  "cc",
  "jsonrpsee",
+ "libc",
  "pkg-config",
  "reth-ipc",
  "sdl2-sys",

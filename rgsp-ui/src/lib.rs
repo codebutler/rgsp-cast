@@ -4,5 +4,6 @@
 //! are built on.
 
 pub mod rpc;
+pub mod service;
 pub mod sys;
 pub mod ui;
