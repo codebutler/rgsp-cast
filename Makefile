@@ -11,7 +11,7 @@ LIBDIR  ?= $(DESTDIR)/lib-trimui
 IMAGE   ?= ubuntu:22.04
 CFLAGS  ?= -O2 -Wall -Wextra
 
-BINS = bin/rgsp-cast bin/rgsp-audio-pump bin/fmt-probe
+BINS = bin/rgsp-cast
 
 .PHONY: all clean deploy run monitor
 
@@ -54,18 +54,6 @@ bin/test-idr-cadence: tests/test_idr_cadence.c librgspcast.a
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
 		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
 		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
-
-bin/rgsp-audio-pump: src/rgsp-audio-pump.c
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $<'
-
-bin/fmt-probe: tools/fmt-probe.c
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< -ldl'
 
 deploy: $(BINS)
 	ssh $(DEVICE) 'mkdir -p $(DESTDIR)'

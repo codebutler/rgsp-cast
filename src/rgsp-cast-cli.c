@@ -110,13 +110,17 @@ int main(int argc, char **argv)
     if (!out) { LOG("fopen(%s): %s", out_path, strerror(errno)); goto done; }
 
     /* Audio comes from an ALSA `type file` tee that the sound server writes
-     * continuously (see scripts/install-audio-tee.sh). Seek to the end at
-     * capture start so we copy only what plays during this recording, then
-     * follow the file as it grows. */
+     * continuously. Seek to the end at capture start so we copy only what
+     * plays during this recording, then follow the file as it grows.
+     *
+     * DEAD PATH: nothing creates either source any more. The tee approach was
+     * replaced by snd-aloop (see the daemon's routing.rs), and the pump and
+     * its ALSA config were deleted with it. -a/-A are kept only until this
+     * file is replaced by the Rust CLI, which drops them. */
     if (!audio_off) {
-        /* Two sources are supported. A Unix socket is rgsp-audio-pump, which
-         * ALSA spawns and which streams live audio with nothing on disk. A
-         * regular file is the older `type file` tee, followed from EOF. */
+        /* Two sources were supported. A Unix socket was a helper that ALSA
+         * spawned and that streamed live audio with nothing on disk. A regular
+         * file is the older `type file` tee, followed from EOF. */
         struct stat ast;
         int is_sock = (stat(audio_tee, &ast) == 0) && S_ISSOCK(ast.st_mode);
 

@@ -157,16 +157,12 @@ vendor/moonshine/                GameStream protocol layer (git subtree)
   .../control/host_input.rs      our input seam: forward client input
 pak/                             NextUI pak: launch.sh (toggle), hooks, icon
 src/rgsp-cast.c                  the capture library and standalone tool
-src/rgsp-audio-pump.c            ALSA-spawned audio bridge (pipe -> Unix socket)
-etc/asound.conf.tee              ALSA config with the pipe-mode capture tap
 scripts/install-pak.sh           install pak + hooks + vendor libs on the device
 scripts/extract-vendor-libs.sh   pull CedarC libs from TrimUI firmware
 scripts/build-snd-aloop.sh       build snd-aloop.ko for the stock kernel
 bin/snd-aloop.ko                 the built module (vermagic + CRCs match stock)
 reference/stock-kernel-4.9.170.config
                                  the device's own kernel config, from IKCFG_ST
-tools/alsa-cap.c                 ALSA capture -> raw s16le (the device has no arecord)
-tools/fmt-probe.c                queries encoder capabilities (unimplemented here)
 tools/monitor.sh                 raw CPU/GPU/thermal sampler
 Makefile                         build / deploy / run / monitor
 ```
@@ -539,8 +535,9 @@ so module loading is not gated; and `CONFIG_SND_HRTIMER=y` with
 
 **Start the capture stream explicitly.** `snd_pcm_readi()` on a loopback capture
 device fails with `-EIO` if it has to start the stream implicitly; call
-`snd_pcm_prepare()` and `snd_pcm_start()` first and it works. `tools/alsa-cap.c`
-is the reference implementation, and the device ships no `arecord`.
+`snd_pcm_prepare()` and `snd_pcm_start()` first and it works.
+`rgsp-host/src/audio.rs` is the reference implementation; note the device ships
+no `arecord`, so there is nothing to compare against on the box itself.
 
 Capture parameters must match what the playback side negotiated — snd-aloop
 fails the capture side with `-EIO` when the two ends of a cable disagree on
@@ -646,8 +643,9 @@ Do not retry these without new information.
 - **Deep sleep kills USB.** The SP kernel fully stops its USB controllers when
   suspending (BaseOS `docs/05` §2), so adb disappears mid-run. Use SSH over
   Wi-Fi for anything long.
-- `tools/fmt-probe.c` reports the capability queries as unimplemented; that is
-  the expected result on this build, not a failure.
+- **The encoder's capability queries are unimplemented on this build.** Probing
+  established that supported input formats have to be found by trying them, not
+  by asking; that is the expected result here, not a failure.
 - **No mouse or text input.** Mouse, scroll, pen and UTF-8 text packets are
   ignored: the handheld has no pointer, so they have nowhere sensible to go.
 - **Stereo only.** A client that negotiates 5.1 has every audio chunk rejected
