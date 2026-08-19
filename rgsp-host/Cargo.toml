@@ -22,3 +22,10 @@ anyhow = "1"
 alsa = "0.9"
 async-shutdown = "0.2.2"
 toml = "1"
+jsonrpsee = { version = "0.26.0", default-features = false, features = ["server", "macros"] }
+reth-ipc = { path = "../vendor/reth-ipc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+jsonrpsee = { version = "0.26.0", default-features = false, features = ["server", "macros", "async-client"] }

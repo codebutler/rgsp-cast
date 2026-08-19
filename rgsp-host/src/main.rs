@@ -8,7 +8,6 @@
 //!   of the Cedar VE, raw PCM out of the loopback.
 //! - This file is the only place the two meet.
 
-use std::net::{IpAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 
 use async_shutdown::ShutdownManager;
@@ -24,12 +23,10 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use rgsp_host::audio::{CHANNELS, LoopbackCapture, PERIOD_FRAMES};
+use rgsp_host::control::{ControlHandle, PendingEntry};
 use rgsp_host::daemon::PidFile;
 use rgsp_host::routing::CastSink;
-use rgsp_host::status::{DEFAULT_FIFO, Status, StatusWriter};
-use rgsp_host::video::{
-    IdrRequester, PANEL_HEIGHT, PANEL_WIDTH, ResetRequester, VideoConfig, VideoStream,
-};
+use rgsp_host::video::{IdrRequester, ResetRequester, VideoConfig, VideoStream};
 
 /// Moonlight's codec bitmask, as probed by the Vulkan healthcheck this project
 /// deleted (`git show f23d52e^:.../healthcheck.rs`, CODEC_H264 = 0x1,
@@ -47,6 +44,10 @@ const LOOPBACK_CAPTURE_DEVICE: &str = "hw:Loopback,1,0";
 /// TLS keypair and pairing state, so all of it survives a reboot on the SD
 /// card rather than living on the rootfs.
 const DEFAULT_USERDATA: &str = "/mnt/SDCARD/.userdata/h700";
+
+/// The on-device UI's JSON-RPC control socket. Bound before the pidfile is
+/// written, so that a UI which sees the pidfile always finds a live socket.
+const CONTROL_SOCKET: &str = "/tmp/rgsp/control.sock";
 
 /// How often to check whether a Moonlight client has started a session.
 /// `SessionManager` has no "session started" notification; the senders simply
@@ -91,44 +92,17 @@ fn main() -> std::process::ExitCode {
     let userdata = PathBuf::from(
         std::env::var("RGSP_USERDATA").unwrap_or_else(|_| DEFAULT_USERDATA.to_string()),
     );
-    let status = StatusWriter::new(PathBuf::from(
-        std::env::var("RGSP_STATUS_FIFO").unwrap_or_else(|_| DEFAULT_FIFO.to_string()),
-    ));
-
-    // Step 1: the pidfile is the mutual exclusion for the whole daemon, so it
-    // is taken before anything with a side effect.
-    let pid_path = PathBuf::from("/tmp/rgsp/daemon.pid");
-    let pidfile = match PidFile::acquire(&pid_path) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("rgsp-host is already running ({e})");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-
-    // Step 2: route game audio into the loopback. From here on, EVERY exit
-    // path must run `release()` — while this is engaged the handheld's
-    // speaker is silent, and nothing else restores it.
-    let cast_sink = match CastSink::engage(&userdata) {
-        Ok(sink) => sink,
-        Err(e) => {
-            tracing::error!("failed to route audio to the loopback: {e:#}");
-            pidfile.release();
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-
-    // Step 3.
-    status.publish(&Status::Starting);
 
     // Loaded before the runtime exists: it sets `XDG_DATA_HOME`, and mutating
     // the environment with other threads running is the pattern Rust 2024 made
-    // `unsafe`. Nothing here needs async.
+    // `unsafe`. Loaded before the pidfile too, so that building the runtime
+    // and serving the control socket (both below) never race a second
+    // instance's config write against this one's.
     let config = match load_config(&userdata) {
         Ok(config) => config,
         Err(e) => {
             tracing::error!("{e:#}");
-            return shutdown(status, cast_sink, pidfile, std::process::ExitCode::FAILURE);
+            return std::process::ExitCode::FAILURE;
         }
     };
 
@@ -136,11 +110,48 @@ fn main() -> std::process::ExitCode {
         Ok(rt) => rt,
         Err(e) => {
             tracing::error!("failed to start the tokio runtime: {e}");
-            return shutdown(status, cast_sink, pidfile, std::process::ExitCode::FAILURE);
+            return std::process::ExitCode::FAILURE;
         }
     };
 
-    let outcome = runtime.block_on(serve(config, &status));
+    // Step 1: serve the control socket before the pidfile is written, so
+    // that a UI which sees the pidfile always finds a live socket rather than
+    // racing this daemon's startup.
+    let control = ControlHandle::new();
+    let control_socket = match runtime.block_on(control.clone().serve(CONTROL_SOCKET)) {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::error!("failed to serve the control socket: {e:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    // Step 2: the pidfile is the mutual exclusion for the whole daemon, so it
+    // is taken before anything else with a side effect.
+    let pid_path = PathBuf::from("/tmp/rgsp/daemon.pid");
+    let pidfile = match PidFile::acquire(&pid_path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("rgsp-host is already running ({e})");
+            let _ = control_socket.stop();
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    // Step 3: route game audio into the loopback. From here on, EVERY exit
+    // path must run `release()` — while this is engaged the handheld's
+    // speaker is silent, and nothing else restores it.
+    let cast_sink = match CastSink::engage(&userdata) {
+        Ok(sink) => sink,
+        Err(e) => {
+            tracing::error!("failed to route audio to the loopback: {e:#}");
+            pidfile.release();
+            let _ = control_socket.stop();
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let outcome = runtime.block_on(serve(config, &control));
     // The hardware loops run as blocking tasks, and dropping a `Runtime`
     // waits for those to finish. A capture loop parked in ALSA or the Cedar
     // driver must not delay restoring the speaker, so give them a moment and
@@ -157,19 +168,14 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     };
-    shutdown(status, cast_sink, pidfile, code)
+    let _ = control_socket.stop();
+    shutdown(cast_sink, pidfile, code)
 }
 
-/// Publish `Stopped`, restore audio routing, drop the pidfile. Runs on clean
-/// shutdown, on SIGTERM/SIGINT, and on every startup failure after
-/// `CastSink::engage` succeeded.
-fn shutdown(
-    status: StatusWriter,
-    cast_sink: CastSink,
-    pidfile: PidFile,
-    code: std::process::ExitCode,
-) -> std::process::ExitCode {
-    status.publish(&Status::Stopped);
+/// Restore audio routing and drop the pidfile. Runs on clean shutdown, on
+/// SIGTERM/SIGINT, and on every startup failure after `CastSink::engage`
+/// succeeded.
+fn shutdown(cast_sink: CastSink, pidfile: PidFile, code: std::process::ExitCode) -> std::process::ExitCode {
     if let Err(e) = cast_sink.release() {
         tracing::error!("failed to restore audio routing: {e:#}");
     }
@@ -177,7 +183,7 @@ fn shutdown(
     code
 }
 
-async fn serve(config: Config, status: &StatusWriter) -> anyhow::Result<()> {
+async fn serve(config: Config, control: &ControlHandle) -> anyhow::Result<()> {
     tracing::debug!("using configuration:\n{config:#?}");
 
     let shutdown = ShutdownManager::new();
@@ -205,7 +211,11 @@ async fn serve(config: Config, status: &StatusWriter) -> anyhow::Result<()> {
         .persistent_state()
         .get_uuid()
         .map_err(|()| anyhow::anyhow!("failed to read the server's unique id"))?;
-    let paired = client_manager.persistent_state().has_any_client();
+
+    // The socket is already serving (main.rs served it before the pidfile),
+    // so `submit_pin` calls made in the brief window before this point are
+    // answered with "pairing not available" rather than panicking or hanging.
+    control.set_client_manager(client_manager.clone());
 
     let _rtsp = RtspServer::new(
         config.address.clone(),
@@ -233,21 +243,32 @@ async fn serve(config: Config, status: &StatusWriter) -> anyhow::Result<()> {
     .map_err(|()| anyhow::anyhow!("failed to start the webserver"))?;
     let _discovery = MdnsDiscovery::spawn(&config.address, config.webserver.port, &config.name);
 
-    // Step 5.
-    let idle = idle_status(paired, config.webserver.port);
-    status.publish(&idle);
     tracing::info!("rgsp-host is ready and waiting for connections");
 
+    // Step 5: keep the UI's pending-pairing list current. `pending_changed`
+    // fires after every mutation of the pending set, including removal on
+    // successful pairing, but `Notify::notify_waiters` stores no permit — so
+    // the snapshot is pushed once up front, before the loop ever awaits it,
+    // or a change landing between spawn and the first `notified().await`
+    // would be missed.
+    let pending_watcher = {
+        let control = control.clone();
+        let client_manager = client_manager.clone();
+        tokio::spawn(async move {
+            let changed = client_manager.pending_changed();
+            control.set_pending(pending_entries(&client_manager));
+            loop {
+                changed.notified().await;
+                control.set_pending(pending_entries(&client_manager));
+            }
+        })
+    };
+
     // Step 6.
-    let pump = tokio::spawn(session_pump(
-        session_manager.clone(),
-        client_manager,
-        config.webserver.port,
-        shutdown.clone(),
-        status.clone(),
-    ));
+    let pump = tokio::spawn(session_pump(session_manager.clone(), shutdown.clone(), control.clone()));
 
     shutdown.wait_shutdown_triggered().await;
+    pending_watcher.abort();
 
     // Stop the session explicitly rather than letting `SessionManager`'s
     // `Drop` do it. That `Drop` calls `Handle::block_on` when a session is
@@ -260,29 +281,15 @@ async fn serve(config: Config, status: &StatusWriter) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn idle_status(paired: bool, http_port: u16) -> Status {
-    let addr = lan_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "no network".to_string());
-    if paired {
-        Status::Ready { addr }
-    } else {
-        // Moonlight's pairing flow appends its own `?uniqueid=`; this is the
-        // page the user opens to type the PIN in
-        // (`webserver/pairing.rs` logs the full URL once a client starts).
-        Status::AwaitingPairing {
-            url: format!("http://{addr}:{http_port}/pin"),
-        }
-    }
-}
-
-/// The address a client on the LAN would reach us on. A connected UDP socket
-/// picks the interface the kernel would route through without sending
-/// anything, which beats guessing at interface names.
-fn lan_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?;
-    socket.local_addr().ok().map(|addr| addr.ip())
+/// `ClientManager::pending_clients` returns moonshine-core's `PendingInfo`;
+/// the control socket's wire type is `PendingEntry`. Same shape, different
+/// crate, so it's a mapping rather than a shared type.
+fn pending_entries(client_manager: &ClientManager) -> Vec<PendingEntry> {
+    client_manager
+        .pending_clients()
+        .into_iter()
+        .map(|p| PendingEntry { id: p.id, name: p.name })
+        .collect()
 }
 
 fn spawn_signal_handler(shutdown: ShutdownManager<ShutdownReason>) {
@@ -311,10 +318,8 @@ fn spawn_signal_handler(shutdown: ShutdownManager<ShutdownReason>) {
 /// therefore joined before the loop comes round again.
 async fn session_pump(
     session_manager: SessionManager,
-    client_manager: ClientManager,
-    http_port: u16,
     shutdown: ShutdownManager<ShutdownReason>,
-    status: StatusWriter,
+    control: ControlHandle,
 ) {
     loop {
         // Wait for RTSP PLAY to build the streams.
@@ -350,14 +355,10 @@ async fn session_pump(
         }
 
         // Moonlight negotiates its own resolution (commonly 1280x720);
-        // `VideoStream::run` clamps to the panel geometry and logs. The status
-        // line reports what the client will actually decode.
-        status.publish(&Status::Connected {
-            client: "Moonlight".to_string(),
-            width: PANEL_WIDTH,
-            height: PANEL_HEIGHT,
-            fps,
-        });
+        // `VideoStream::run` clamps to the panel geometry and logs — the panel
+        // geometry is what the client will actually decode.
+        control.set_client(Some("Moonlight".to_string()));
+        control.set_casting(true);
         tracing::info!(
             "session started: {}x{} @ {fps} fps, {} bps requested, codec {:?}",
             context.width,
@@ -384,7 +385,7 @@ async fn session_pump(
             fps,
             bitrate: context.bitrate as u32,
         });
-        let control = tokio::spawn(forward_encoder_control(
+        let control_task = tokio::spawn(forward_encoder_control(
             control_rx,
             video.idr_requester(),
             video.reset_requester(),
@@ -416,7 +417,7 @@ async fn session_pump(
                 report("video capture", video_task.await);
             },
         }
-        control.abort();
+        control_task.abort();
         // The pad is dropped with the task, which releases every held button.
         // A client that disconnects mid-press must not leave the emulator
         // seeing a key held down forever.
@@ -424,18 +425,13 @@ async fn session_pump(
             task.abort();
         }
 
+        control.set_client(None);
+        control.set_casting(false);
+
         if shutdown.is_shutdown_triggered() {
             return;
         }
         tracing::info!("session ended, waiting for the next client");
-        // Recomputed rather than cached: a first-time user is unpaired at
-        // startup and paired by the time their first session ends, so a cached
-        // line would tell them to pair again. This also refreshes the address
-        // if DHCP moved us.
-        status.publish(&idle_status(
-            client_manager.persistent_state().has_any_client(),
-            http_port,
-        ));
     }
 }
 
