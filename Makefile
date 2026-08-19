@@ -90,14 +90,14 @@ bin/snd-aloop.ko:
 .PHONY: test-rust
 test-rust:
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w rust:1-bookworm \
-		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev pkg-config >/dev/null 2>&1 && \
+		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libsamplerate0-dev libgles-dev libclang-dev pkg-config >/dev/null 2>&1 && \
 		       cargo clean -p audiopus_sys && cargo test --workspace'
 
 .PHONY: pak
 pak: bin/snd-aloop.ko
 	@mkdir -p $(PAKDIR)/lib/h700
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w rust:1-bookworm \
-		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev pkg-config >/dev/null 2>&1 && \
+		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libsamplerate0-dev libgles-dev libclang-dev pkg-config >/dev/null 2>&1 && \
 		       cargo clean --release -p audiopus_sys && \
 		       cargo build --workspace --release'
 	cp target/release/rgsp-host $(PAKDIR)/
