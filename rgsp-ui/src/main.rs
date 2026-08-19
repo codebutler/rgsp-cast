@@ -1,46 +1,31 @@
-use rgsp_ui::sys;
+use rgsp_ui::ui::Ui;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    // SAFETY: single-threaded startup, and NextUI's documented init order (see
-    // workspace/all/clock/clock.c). InitSettings and QuitSettings bracket the
-    // whole body so the settings are released even when bring-up fails partway
-    // — an early return between the two would be an unpaired acquire.
-    unsafe {
-        sys::InitSettings();
-        let result = show_display();
-        sys::QuitSettings();
-        result
+    // `Ui::new()`/`Drop` bracket the display, the same way Task 3's
+    // `InitSettings`/`show_display`/`QuitSettings` did — except now the
+    // release is structural: Drop runs even if a panic unwinds through the
+    // body below.
+    let mut ui = Ui::new()?;
+    let (w, h) = ui.size();
+    tracing::info!(w, h, "display up");
+
+    tracing::info!("waiting for B");
+    loop {
+        ui.begin();
+        ui.header("rgsp-ui");
+        ui.row("First option", None, 0, false);
+        ui.row("Second option", Some("on"), 1, true);
+        ui.row("Third option", Some("42"), 2, false);
+        ui.hints(&[("A", "SELECT"), ("B", "BACK")]);
+        ui.end();
+
+        let buttons = ui.poll();
+        if buttons.b {
+            break;
+        }
     }
-}
 
-/// Bring the display up, log its dimensions, clear it, and tear it back down.
-///
-/// Proving the teardown releases `/dev/fb0` is the whole point of this binary.
-///
-/// # Safety
-///
-/// The caller must have called `InitSettings` beforehand and must call
-/// `QuitSettings` afterwards, on the same thread.
-unsafe fn show_display() -> anyhow::Result<()> {
-    // SAFETY: every pointer here is owned by C. `screen` is null-checked before
-    // use and stays valid until GFX_quit, which is the last thing to touch it.
-    unsafe {
-        let screen = sys::GFX_init(sys::MODE_MENU as i32);
-        anyhow::ensure!(!screen.is_null(), "GFX_init returned null");
-        sys::PLAT_initInput();
-        sys::PWR_init();
-
-        tracing::info!(w = (*screen).w, h = (*screen).h, "display up");
-
-        sys::PLAT_clearVideo(screen);
-        sys::GFX_flip(screen);
-
-        // Torn down in reverse order of init, so nothing outlives what it uses.
-        sys::PWR_quit();
-        sys::PLAT_quitInput();
-        sys::GFX_quit();
-    }
     Ok(())
 }

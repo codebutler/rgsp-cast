@@ -73,8 +73,17 @@ fn main() {
         .header(plat.join("msettings.h").to_str().unwrap())
         .clang_args(["-I", common.to_str().unwrap(), "-I", plat.to_str().unwrap()])
         .clang_args(["-DPLATFORM=\"h700\"", "-DUSE_SDL2", "-DUSE_GLES"])
-        .allowlist_function("GFX_.*|PLAT_.*|PWR_.*|PAD_.*|SND_.*|InitSettings|QuitSettings")
+        // TTF_RenderUTF8_Blended is declared in SDL_ttf.h, which api.h already
+        // pulls in for GFX_Fonts/TTF_Font (see the blocklist_type comment
+        // below) — sdl2-sys does not expose it because the crate's "ttf"
+        // feature is off, so it has to come from here instead.
+        .allowlist_function("GFX_.*|PLAT_.*|PWR_.*|PAD_.*|SND_.*|TTF_.*|InitSettings|QuitSettings")
         .allowlist_type("GFX_Fonts")
+        // PADDING is deliberately absent: h700/platform.h redefines it as
+        // `(hdmi_active||is_cube)?5:10`, a runtime expression like
+        // FIXED_WIDTH/FIXED_HEIGHT (see task-3-context.md), so bindgen drops
+        // it silently rather than emitting a wrong constant. ui.rs hand-copies
+        // the RGSP's branch (no HDMI, not a cube) as a local constant.
         .allowlist_var("font|FIXED_SCALE|PILL_SIZE|BUTTON_SIZE|MODE_MENU|BTN_.*|ASSET_.*")
         // SDL types come from sdl2-sys; a second copy would be a second ABI to
         // keep correct by hand. TTF_Font is deliberately NOT blocked: sdl2-sys
