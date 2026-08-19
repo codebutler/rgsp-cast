@@ -1,26 +1,23 @@
 # rgsp-cast
 
-Hardware H.264 screen capture for the **Anbernic RG SP** (Allwinner H700 /
-sun50iw9) running **BaseOS + NextUI**.
+Stream the screen and sound of an **Anbernic RG SP** (Allwinner H700 /
+sun50iw9, **BaseOS + NextUI**) to any Moonlight client — an Apple TV, a phone,
+a desktop.
 
-Reads `/dev/fb0` and encodes it on the SoC's Cedar video engine, with game audio
-captured through an ALSA loopback. Encoding is done entirely in hardware, including
-the RGB→YUV colour conversion, so the whole pipeline costs about **one seventh
-of one CPU core** and the emulator does not notice it is running.
+The handheld runs a GameStream host. It reads `/dev/fb0`, encodes on the SoC's
+Cedar video engine, and captures game audio through a kernel ALSA loopback.
+Video encoding is entirely in hardware, including the RGB→YUV conversion and
+the scale to whatever resolution the client negotiates, so capture costs about
+**one seventh of one CPU core** and the emulator does not notice it is running.
 
 ```
-720x480 @ 30.0 fps sustained · 1.8 ms/frame CPU · ~2 Mbps · H.264 Main level 4.1
-      + 48 kHz stereo audio, measured drift within ±6 ms
+720x480 panel · H.264 Main · hardware-scaled to the client's resolution
+48 kHz stereo Opus · ~17 ms host-side latency (one frame)
 ```
 
 ## Status
 
-Working and measured: **video and audio**, muxed to MP4.
-
-Audio capture runs through the kernel loopback. `bin/snd-aloop.ko` is
-**verified on hardware** — it loads with plain `insmod` and carries live game
-audio (see [Audio](#audio)). Wiring `rgsp-cast` to read the capture side is the
-piece in progress.
+Working: **streaming to Moonlight**, video and audio, over Wi-Fi.
 
 | | |
 |---|---|
@@ -28,26 +25,41 @@ piece in progress.
 | OS | BaseOS + NextUI, kernel 4.9.170 |
 | Panel | 720x480, 32bpp BGRA, double-buffered (720x960 virtual) |
 | IC version | `0x3301000012011` |
-| Video out | Annex-B H.264 elementary stream (Main, level 4.1) |
-| Audio out | raw s16le 48 kHz stereo, muxed to AAC |
+| Video | H.264 Main, level 4.1, hardware-scaled to the negotiated resolution |
+| Audio | Opus 48 kHz stereo, 5 ms frames, via `snd-aloop` |
+| Protocol | GameStream, on a vendored [moonshine](https://github.com/hgaiser/moonshine) |
+| Clients | Moonlight (tvOS, macOS, iOS, Android, desktop) |
 
-Streaming this to a TV is planned in
-[docs/superpowers/plans/2026-08-15-rgsp-cast-gamestream-host.md](docs/superpowers/plans/2026-08-15-rgsp-cast-gamestream-host.md).
+The standalone capture tool (`bin/rgsp-cast`, records to a file) still exists
+and is how the encoder is exercised without a client.
 
 ## Quick start
+
+Streaming to a TV:
 
 ```sh
 # 1. Fetch the vendor libraries (once). Downloads the pinned TrimUI firmware,
 #    verifies its checksum, and extracts the CedarC libs into vendor-libs/.
 ./scripts/extract-vendor-libs.sh
-scp -r vendor-libs root@DEVICE:/tmp/venc/lib-trimui
 
-# 2. For sound, load the loopback module once per boot
+# 2. Build the loopback module (once). The stock kernel ships without it.
 ./scripts/build-snd-aloop.sh
-scp bin/snd-aloop.ko root@DEVICE:/tmp/
-ssh root@DEVICE 'insmod /tmp/snd-aloop.ko'
 
-# 3. Build (in an arm64 container) and record 30 s
+# 3. Build and install the pak, the hooks and the vendor libs.
+make pak
+./scripts/install-pak.sh root@DEVICE
+```
+
+Then on the handheld: **Tools → Cast**. It toggles — once to start, again to
+stop. The screen shows the pairing address while idle and the client name while
+connected.
+
+To pair, add the handheld's IP in Moonlight, then enter the PIN it shows at
+`http://DEVICE:47989/pin` from any browser on the network. Pairing persists.
+
+Recording to a file instead, no client involved:
+
+```sh
 make run DEVICE=root@DEVICE DURATION=30 OUT=session.h264
 # -> session.mp4: video stream-copied, audio encoded to AAC
 ```
@@ -58,32 +70,28 @@ Already have the firmware? Pass it instead of downloading — `.zip` or `.awimg`
 ./scripts/extract-vendor-libs.sh ~/Downloads/trimui_tg5040_20251128_v1.1.1.zip
 ```
 
-Manually:
+## Streaming
 
-```sh
-LD_LIBRARY_PATH=/tmp/venc/lib-trimui ./rgsp-cast -o out.h264 -d 30 -f 30
-```
+The host advertises **H.264 only**, and every client setting works with it,
+including "auto" codec selection.
 
-```
--o FILE   output Annex-B .h264        (default cast.h264)
--d SECS   duration                    (default 30)
--f FPS    target frame rate           (default 30)
--n FRAMES stop after N frames         (overrides -d)
--i FMT    input format: 12 = ARGB passthrough (default), 0 = NV12 via CPU
--a PATH   audio source to follow      (default /tmp/rgsp-audio.pcm)
--A        video only, ignore audio
--v        per-frame logging
-```
+What the client negotiates, it gets:
 
-Audio lands beside the video as `<output>.h264.pcm` (raw s16le 48 kHz stereo).
+- **Resolution.** The panel is 720x480; the VE scales to whatever the client
+  asked for. The image is pillarboxed to keep its proportions, so a 16:9 client
+  sees black bars rather than a stretched picture.
+- **Bitrate.** Capped at 6 Mbps regardless of the request — the source is a
+  720x480 panel, and a higher ceiling only produces keyframes large enough to
+  strain the handheld's Wi-Fi.
+- **Keyframes** are client-driven. The encoder's periodic interval is pushed
+  out, and an IDR is produced when the client asks for one, at most one per
+  750 ms.
 
-`make run` does the muxing for you. By hand — note the explicit `-map`, without
-which ffmpeg silently drops the raw PCM:
+A small red marker is composited into the outgoing stream so the receiving
+screen shows the cast is live. The handheld's own display is never written to.
 
-```sh
-ffmpeg -r 30 -i out.h264 -f s16le -ar 48000 -ac 2 -i out.h264.pcm \
-       -map 0:v -map 1:a -c:v copy -c:a aac -movflags +faststart out.mp4
-```
+One session at a time. While casting, all handheld audio is routed to the
+client and its own speaker is silent; both are restored when casting stops.
 
 ## Vendor libraries
 
@@ -131,17 +139,23 @@ predating the H616/H618 entirely. The 2025 TrimUI build accepts it.
 ## How it works
 
 ```
-/dev/fb0 ──pread──> heap buffer ──memcpy──> ION buffer ──> Cedar VE ──> H.264
-   BGRA               (cached)              (IOMMU-mapped)   ISP does
-   720x480                                                   RGB→YUV
+/dev/fb0 ─pread─> heap buf ─memcpy─> ION buffer ─> Cedar VE ─> H.264 ─> packetize ─> UDP
+  BGRA            (cached)           (IOMMU)       ISP: RGB→YUV        RTP+FEC+AES
+  720x480                            pillarboxed   + scale to client
 
-snd-aloop capture side ───────────────────────────────────────────> .pcm
-   the game's playback, paced by the kernel                    (s16le 48k)
+snd-aloop ─readi─> PCM ─> bridge ─> Opus ─────────────────────────────> UDP
+  capture side           (i16→f32)   5 ms frames                        RTP+FEC
+  paced by the kernel
 ```
 
 Per frame: read the visible framebuffer page, copy it into the encoder's ION
 input buffer, submit, drain the bitstream. The VE's ISP block does the colour
 conversion on ingest, so the CPU never touches pixel values.
+
+`rgsp-host` is the daemon. It owns capture and encoding; the vendored
+moonshine crate owns pairing, RTSP, packetization, encryption and the sockets.
+The two meet at `host_source.rs` on each of the video and audio sides — all
+host-specific logic lives in those files so the vendored tree stays mergeable.
 
 Double buffering matters: the panel has a 720x960 virtual framebuffer and
 `yoffset` says which half is on screen. Reading offset 0 unconditionally — as
@@ -257,19 +271,36 @@ Do not retry these without new information.
   Wi-Fi for anything long.
 - `tools/fmt-probe.c` reports the capability queries as unimplemented; that is
   the expected result on this build, not a failure.
+- **No input.** Controller and touch input from the client is parsed and
+  discarded; this is a one-way screen cast.
+- **Stereo only.** A client that negotiates 5.1 has every audio chunk rejected
+  and hears silence.
+- **A reconnecting client resumes the running session** rather than
+  renegotiating, so a client that reconnects within the 60 s timeout keeps the
+  original session's resolution. Restart the daemon to change it.
+- **Latency** is about one frame on the host. What the viewer perceives beyond
+  that is network and client-side buffering; Moonlight's V-Sync and frame
+  pacing options are the levers.
 
 ## Audio
 
 Capture is an ordinary ALSA capture device: `default` feeds the kernel loopback,
-and `rgsp-cast` reads the other end.
+and the host reads the other end.
 
 ```
-default → snd-aloop  →  rgsp-cast reads the capture side
+game → default → snd-aloop → rgsp-host reads the capture side → Opus → client
 ```
+
+While casting, `$USERDATA_PATH/.asoundrc` points `pcm.!default` at
+`hw:Loopback,0,0`, so everything the handheld plays goes to the client instead
+of its speaker. It is removed when casting stops, and a boot hook removes a
+stale one left by a crash. Only processes that open ALSA *after* the file is
+written are routed, so a game already running when casting starts keeps
+playing to the speaker.
 
 The kernel paces the loopback, so the timeline is continuous at 48 kHz and does
 not depend on the codec's crystal. Stream parameters are **S16_LE, 2 ch,
-48000 Hz**.
+48000 Hz**, read in 5 ms periods with a 16-period buffer.
 
 The stock kernel ships with `CONFIG_SND_ALOOP` unset, so the module is built
 separately. `bin/snd-aloop.ko` matches the stock kernel exactly:
@@ -389,7 +420,13 @@ Caveats:
 ## Layout
 
 ```
-src/rgsp-cast.c                  the capture tool
+rgsp-host/                       the streaming daemon (capture, encode, routing)
+vendor/moonshine/                vendored GameStream protocol layer (git subtree)
+  .../video/host_source.rs       our video seam: packetize loop, encoder control
+  .../audio/host_source.rs       our audio seam: PCM -> Opus frame bridge
+pak/                             NextUI pak: launch.sh (toggle), hooks, icon
+scripts/install-pak.sh           install pak + hooks + vendor libs on the device
+src/rgsp-cast.c                  the capture library and standalone tool
 src/rgsp-audio-pump.c            ALSA-spawned audio bridge (pipe -> Unix socket)
 etc/asound.conf.tee              ALSA config with the pipe-mode capture tap
 scripts/extract-vendor-libs.sh   pull CedarC libs from TrimUI firmware
