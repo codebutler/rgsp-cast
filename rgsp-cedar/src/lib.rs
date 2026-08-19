@@ -5,4 +5,5 @@
 //! (dlopen'd at runtime, never linked) plus the bitstream logic layered on
 //! top of them.
 
+pub mod bitstream;
 pub mod vendor_abi;
