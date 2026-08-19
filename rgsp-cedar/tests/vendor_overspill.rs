@@ -8,6 +8,9 @@
 //!
 //! The layout half runs anywhere. The sentinel half needs the device.
 
+mod common;
+
+use common::{on_device, LOCK};
 use rgsp_cedar::capture::Capture;
 use rgsp_cedar::vendor_abi::*;
 use std::mem::size_of;
@@ -46,10 +49,11 @@ fn output_buffer_tail_is_256_bytes() {
 /// is visible in the output.
 #[test]
 fn input_buffer_spill_stays_inside_the_guard() {
-    if !std::path::Path::new("/dev/fb0").exists() {
+    if !on_device() {
         eprintln!("skipping: no /dev/fb0");
         return;
     }
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let mut cap = Capture::open(720, 480, 30, 2_000_000).expect("open");
     for _ in 0..3 {

@@ -2,7 +2,6 @@
 name = "rgsp-host"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
 
 [lib]
 name = "rgsp_host"
@@ -14,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 moonshine-core = { path = "../vendor/moonshine/moonshine-core" }
+rgsp-cedar = { path = "../rgsp-cedar" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

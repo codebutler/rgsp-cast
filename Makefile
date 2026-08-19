@@ -11,41 +11,9 @@ LIBDIR  ?= $(DESTDIR)/lib-trimui
 IMAGE   ?= ubuntu:22.04
 CFLAGS  ?= -O2 -Wall -Wextra
 
-BINS = bin/rgsp-cast
-
 .PHONY: all clean deploy run monitor
 
-all: $(BINS)
-
-librgspcast.a: src/rgsp-cast.c src/rgsp_cast_internal.h include/rgsp_cast.h
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc binutils >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -c -o /tmp/rgsp-cast.o src/rgsp-cast.c && \
-		       ar rcs $@ /tmp/rgsp-cast.o'
-
-bin/rgsp-cast: src/rgsp-cast-cli.c librgspcast.a
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
-
-bin/test-capture-api: tests/test_capture_api.c librgspcast.a
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
-
-bin/test-reopen-leak: tests/test_reopen_leak.c librgspcast.a
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
-
-bin/test-idr-cadence: tests/test_idr_cadence.c librgspcast.a
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
+all: bin/snd-aloop.ko
 
 deploy: $(BINS)
 	ssh $(DEVICE) 'mkdir -p $(DESTDIR)'
@@ -119,7 +87,7 @@ test-rust:
 		       cargo clean -p audiopus_sys && cargo test --workspace'
 
 .PHONY: pak
-pak: librgspcast.a bin/snd-aloop.ko
+pak: bin/snd-aloop.ko
 	@mkdir -p $(PAKDIR)/lib/h700
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w rust:1-bookworm \
 		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev pkg-config >/dev/null 2>&1 && \
@@ -134,4 +102,4 @@ pak: librgspcast.a bin/snd-aloop.ko
 	@echo "   lib/h700 is populated on the device at install time"
 
 clean:
-	rm -rf bin librgspcast.a
+	rm -rf bin

@@ -161,8 +161,8 @@ impl VideoStream {
             PANEL_HEIGHT,
             self.cfg.width,
             self.cfg.height,
-            self.cfg.fps,
-            bitrate,
+            self.cfg.fps as i32,
+            bitrate as i32,
         )
         .map_err(|e| anyhow!("Capture::open: {e}"))?;
 

@@ -1658,6 +1658,7 @@ dependencies = [
  "async-shutdown",
  "libc",
  "moonshine-core",
+ "rgsp-cedar",
  "tokio",
  "toml",
  "tracing",

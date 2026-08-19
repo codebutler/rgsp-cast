@@ -1,17 +1,9 @@
 //! Replaces tests/test_capture_api.c. Runs only on the device.
 
+mod common;
+
+use common::{on_device, LOCK};
 use rgsp_cedar::capture::Capture;
-use std::sync::Mutex;
-
-/// Capture is single-instance per process by design, so tests that open one
-/// must not run concurrently. cargo's harness is threaded by default, and on
-/// the device - where neither test short-circuits - an unserialised pair races
-/// for the guard and one fails.
-static LOCK: Mutex<()> = Mutex::new(());
-
-fn on_device() -> bool {
-    std::path::Path::new("/dev/fb0").exists()
-}
 
 #[test]
 fn captures_annexb_frames_starting_with_a_keyframe() {
