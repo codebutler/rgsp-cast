@@ -53,12 +53,40 @@ const DEFAULT_USERDATA: &str = "/mnt/SDCARD/.userdata/h700";
 /// become `Some` once RTSP PLAY has built the streams.
 const SESSION_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Exercise the virtual gamepad on its own: create it, then press and release
+/// A once a second. Used to check that an emulator already running picks up a
+/// device that appears after it started - the one thing about this path that
+/// cannot be settled by reading code.
+fn input_selftest() -> anyhow::Result<()> {
+    let mut pad = rgsp_host::input::VirtualPad::open()?;
+    tracing::info!("pressing BTN_SOUTH (A) once a second; ctrl-c to stop");
+    let mut down = false;
+    loop {
+        down = !down;
+        let mut state = rgsp_host::input::PadState::default();
+        state.set_key(304, down);
+        pad.apply(state)?;
+        tracing::info!("A {}", if down { "down" } else { "up" });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    if std::env::args().any(|a| a == "--input-selftest") {
+        return match input_selftest() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!("input selftest failed: {e:#}");
+                std::process::ExitCode::FAILURE
+            },
+        };
+    }
 
     let userdata = PathBuf::from(
         std::env::var("RGSP_USERDATA").unwrap_or_else(|_| DEFAULT_USERDATA.to_string()),
@@ -309,6 +337,7 @@ async fn session_pump(
         };
         let audio_tx = session_manager.audio_frame_sender().await;
         let control_rx = session_manager.encoder_control_receiver().await;
+        let input_rx = session_manager.input_receiver().await;
 
         // The client chooses this, and `rtp_timestamp_for` divides by it, so a
         // malformed ANNOUNCE carrying 0 would panic the video task and tear the
@@ -367,6 +396,11 @@ async fn session_pump(
             video.reset_requester(),
         ));
 
+        // Client input, if the pad could be created. A device without
+        // /dev/uinput still streams; it just cannot be controlled remotely,
+        // which is worth a warning rather than failing the session.
+        let input_task = input_rx.map(|rx| tokio::spawn(run_input(rx)));
+
         let mut video_task = tokio::task::spawn_blocking(move || run_video(video, frame_tx));
         let mut audio_task = tokio::task::spawn_blocking(move || run_audio(audio_tx));
 
@@ -389,6 +423,12 @@ async fn session_pump(
             },
         }
         control.abort();
+        // The pad is dropped with the task, which releases every held button.
+        // A client that disconnects mid-press must not leave the emulator
+        // seeing a key held down forever.
+        if let Some(task) = input_task {
+            task.abort();
+        }
 
         if shutdown.is_shutdown_triggered() {
             return;
@@ -417,6 +457,45 @@ fn report(what: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>
 ///
 /// Runs on a blocking thread: `Capture::next` sleeps until the frame deadline,
 /// and `blocking_send` parks when the bounded channel is full.
+/// Feed client input into the virtual gamepad for the life of a session.
+///
+/// The pad is created here and dropped when this task ends, so its buttons are
+/// released and the device disappears with the session.
+async fn run_input(mut input_rx: mpsc::Receiver<Vec<u8>>) {
+    let mut pad = match rgsp_host::input::VirtualPad::open() {
+        Ok(pad) => pad,
+        Err(e) => {
+            tracing::warn!("no virtual gamepad, remote input disabled: {e:#}");
+            return;
+        },
+    };
+
+    // One running state, updated in place: each packet carries the complete
+    // set of buttons held at that instant, and `apply` emits only the edges.
+    let mut state = rgsp_host::input::PadState::default();
+    let mut seen: u32 = 0;
+    let mut unhandled: u32 = 0;
+    let mut last_report = std::time::Instant::now();
+    while let Some(payload) = input_rx.recv().await {
+        seen += 1;
+        if rgsp_host::input_decode::apply_packet(&payload, &mut state) {
+            if let Err(e) = pad.apply(state) {
+                tracing::warn!("failed to inject input, stopping: {e:#}");
+                return;
+            }
+        } else {
+            // Mouse, scroll, pen, text and haptics all land here; only
+            // controller and keyboard packets drive the pad.
+            unhandled += 1;
+            if last_report.elapsed() >= std::time::Duration::from_secs(30) {
+                tracing::debug!("input: {seen} packets, {unhandled} not applicable to the pad");
+                last_report = std::time::Instant::now();
+            }
+        }
+    }
+    tracing::debug!("input channel closed");
+}
+
 fn run_video(video: VideoStream, frame_tx: mpsc::Sender<EncodedFrame>) -> anyhow::Result<()> {
     video.run(|frame| {
         // Note the field-name difference across the crate boundary:

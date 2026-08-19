@@ -99,6 +99,8 @@ RUST_LOG=rgsp_host=debug,moonshine_core::session::stream=debug
 - `audio: N periods captured, peak amplitude N` — peak 0 means silence is being
   captured; non-zero means the fault is downstream.
 - `audio encoder behind: N PCM frame(s) dropped` — audible as crackle.
+- `input: N packets, M not applicable to the pad` — mouse/scroll/pen/haptics
+  land in M; if N stays 0 the client is sending nothing.
 
 ## Things that will mislead you
 
@@ -113,6 +115,14 @@ RUST_LOG=rgsp_host=debug,moonshine_core::session::stream=debug
   already running when casting starts is not routed.
 - **snd-aloop rejects the implicit start** that `readi()` would do; capture
   needs an explicit `prepare()` + `start()`.
+- **Input key codes carry a `0x80` high byte.** The down arrow arrives as
+  `0x8028`, not `0x0028`; mask with `0x00FF` as Sunshine does
+  (`src/input.cpp`). Unmasked, nothing matches and every key is silently
+  ignored.
+- **Magic `0x0D` is both `MULTI_CONTROLLER` and `ENABLE_HAPTICS`**, separated
+  only by length (24 bytes vs 6).
+- **moonlight-qt sends keyboard, not controller, packets** unless a gamepad is
+  attached, so testing the controller path needs real hardware.
 
 ## The vendored tree
 

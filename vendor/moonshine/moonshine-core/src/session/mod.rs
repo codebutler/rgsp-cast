@@ -206,6 +206,7 @@ impl LaunchedSession {
 		frame_rx: mpsc::Receiver<EncodedFrame>,
 		control_tx: mpsc::Sender<EncoderControl>,
 		pcm_rx: mpsc::Receiver<Vec<i16>>,
+		input: Option<crate::session::stream::control::host_input::InputForwarder>,
 		stop: ShutdownManager<SessionShutdownReason>,
 	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, crate::session::stream::audio::AudioStartGate), ()> {
 		let Self {
@@ -253,6 +254,7 @@ impl LaunchedSession {
 			video_handle,
 			audio_trigger,
 			hdr_metadata_rx,
+			input,
 		);
 
 		Ok((

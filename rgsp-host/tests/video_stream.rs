@@ -23,7 +23,10 @@ fn packetizer_splits_a_frame_into_shards() {
         remote_input_key_id: 0,
     });
     let mut p = Packetizer::new(false, rx);
-    p.warm_up(20, 2);
+    // Third argument caps how far up the shard-count range to pre-build; the
+    // full range costs ~14 s on the target CPU. 64 covers the frame sizes this
+    // host produces, and this frame needs far fewer.
+    p.warm_up(20, 2, 64);
 
     let frame = vec![0u8; 20_000];
     let mut seq = 0u32;

@@ -107,6 +107,11 @@ struct SessionManagerInner {
 	/// after it has already been taken.
 	encoder_control_rx: Option<mpsc::Receiver<EncoderControl>>,
 
+	/// Raw client input payloads, taken once by the host via
+	/// `input_receiver()`. The host owns what an input event means on this
+	/// device; nothing in this crate interprets them.
+	input_rx: Option<mpsc::Receiver<Vec<u8>>>,
+
 	/// Notify to trigger the audio pipeline start (used by bench / external callers).
 	audio_start_notify: Option<crate::session::stream::audio::AudioStartGate>,
 
@@ -139,6 +144,7 @@ impl SessionManagerInner {
 		self.video_frame_tx = None;
 		self.audio_frame_tx = None;
 		self.encoder_control_rx = None;
+		self.input_rx = None;
 		self.stop = ShutdownManager::new();
 	}
 }
@@ -199,6 +205,7 @@ impl SessionManager {
 			video_frame_tx: None,
 			audio_frame_tx: None,
 			encoder_control_rx: None,
+			input_rx: None,
 			shutdown: shutdown.clone(),
 			_trigger_token: trigger_token,
 			_delay_token: delay_token,
@@ -267,6 +274,12 @@ impl SessionManager {
 	/// backpressure behavior.
 	pub async fn encoder_control_receiver(&self) -> Option<mpsc::Receiver<EncoderControl>> {
 		self.inner.lock().await.encoder_control_rx.take()
+	}
+
+	/// Take the client-input receiver. Like the control receiver, there is one
+	/// host consumer, so this yields `Some` once per session.
+	pub async fn input_receiver(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+		self.inner.lock().await.input_rx.take()
 	}
 
 	/// Trigger the video and audio pipelines to start encoding.
@@ -492,6 +505,11 @@ impl SessionManager {
 		// human-timescale events, not a per-frame stream — forward_control()
 		// in host_source.rs drops rather than blocks if it ever fills.
 		let (control_tx, control_rx) = mpsc::channel::<EncoderControl>(8);
+		// Client input. Shallow on purpose: each packet carries the complete
+		// button state, so the newest one supersedes anything queued behind
+		// it and a backlog would only add latency to a control path where
+		// latency is the whole point.
+		let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(8);
 		// Channel the host's audio capture feeds via `audio_frame_sender()`;
 		// the receiving end is bridged into Opus-ready `AudioFrame`s by the
 		// audio stream's `host_source`. Same bound and backpressure
@@ -511,6 +529,7 @@ impl SessionManager {
 				frame_rx,
 				control_tx,
 				audio_pcm_rx,
+				Some(crate::session::stream::control::host_input::InputForwarder::new(input_tx)),
 				stop,
 			)
 			.await
@@ -523,6 +542,7 @@ impl SessionManager {
 				guard.video_frame_tx = Some(frame_tx);
 				guard.audio_frame_tx = Some(audio_frame_tx);
 				guard.encoder_control_rx = Some(control_rx);
+				guard.input_rx = Some(input_rx);
 				Ok(())
 			},
 			Err(()) => {

@@ -90,6 +90,29 @@ What the client negotiates, it gets:
 One session at a time. While casting, all handheld audio is routed to the
 client and its own speaker is silent; both are restored when casting stops.
 
+### Input
+
+The client can drive the handheld. Input arrives on the control stream and is
+injected through `/dev/uinput` as a second gamepad advertising exactly the codes
+the handheld's own `ANBERNIC-keys` reports, so anything that maps the real pad
+by key code treats this one identically.
+
+A connected controller works directly. Without one, the keyboard is mapped:
+
+| key | button |
+|---|---|
+| arrows | d-pad |
+| Z / X | A / B |
+| A / S | X / Y |
+| Q / W | L1 / R1 |
+| Enter / Backspace | Start / Select |
+| Escape | menu |
+
+Two mappings the hardware forces: it exposes `BTN_TL2` but no `BTN_TR2`, so the
+right trigger drives `ABS_RZ`; and there is no `BTN_MODE`, so Guide maps to
+`KEY_GOTO`. Everything held is released when the session ends, so a client that
+disconnects mid-press cannot leave a button stuck down.
+
 ## Vendor libraries
 
 **Anbernic's own firmware ships no CedarC runtime at all.** Mounting the stock
@@ -268,8 +291,8 @@ Do not retry these without new information.
   Wi-Fi for anything long.
 - `tools/fmt-probe.c` reports the capability queries as unimplemented; that is
   the expected result on this build, not a failure.
-- **No input.** Controller and touch input from the client is parsed and
-  discarded; this is a one-way screen cast.
+- **No mouse or text input.** Mouse, scroll, pen and UTF-8 text packets are
+  ignored: the handheld has no pointer, so they have nowhere sensible to go.
 - **Stereo only.** A client that negotiates 5.1 has every audio chunk rejected
   and hears silence.
 - **A reconnecting client resumes the running session** rather than

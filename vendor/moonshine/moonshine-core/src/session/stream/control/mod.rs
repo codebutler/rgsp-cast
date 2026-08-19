@@ -17,6 +17,7 @@ use crate::session::stream::video::VideoStreamHandle;
 use crate::session::stream::video::{HdrMetadata, HdrModeState};
 
 mod feedback;
+pub(crate) mod host_input;
 
 /// Configuration for the control stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -309,6 +310,7 @@ impl ControlStream {
 		video_handle: VideoStreamHandle,
 		audio_trigger: AudioStartHandle,
 		hdr_metadata_rx: watch::Receiver<HdrModeState>,
+		input: Option<host_input::InputForwarder>,
 	) {
 		let Self {
 			stop: stop_session_manager,
@@ -324,6 +326,7 @@ impl ControlStream {
 				context,
 				stop_session_manager,
 				hdr_metadata_rx,
+				input,
 			)
 			.await;
 		});
@@ -437,6 +440,7 @@ async fn run_control_loop(
 	context: ControlStreamContext,
 	stop_session_manager: ShutdownManager<SessionShutdownReason>,
 	mut hdr_metadata_rx: watch::Receiver<HdrModeState>,
+	input: Option<host_input::InputForwarder>,
 ) {
 	// Trigger session shutdown when the control stream stops.
 	let _session_stop_token = stop_session_manager.trigger_shutdown_token(SessionShutdownReason::ControlStreamStopped);
@@ -548,8 +552,10 @@ async fn run_control_loop(
 					ControlMessage::Ping => {
 						stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(stream_timeout);
 					},
-					ControlMessage::InputData(_event) => {
-						tracing::trace!("Skipped input data control message.");
+					ControlMessage::InputData(event) => {
+						if let Some(input) = input.as_ref() {
+							input.forward(event);
+						}
 					},
 					ControlMessage::HdrMode => {
 						tracing::info!("Received HdrMode toggle from client");
