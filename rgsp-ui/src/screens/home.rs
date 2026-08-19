@@ -68,6 +68,21 @@ impl Home {
         HomeAction::None
     }
 
+    /// What the `A` button's hint label should read for the current
+    /// selection: `Pair` on a pending row (that's what `A` does there),
+    /// `Start`/`Stop` on the service row, mirroring `casting`. Pure — no
+    /// `Ui` — so this stays unit-testable alongside `update`, the same
+    /// FFI-free split. The hint bar is the only affordance this device has
+    /// for what a button does, so it must always name the action `A` is
+    /// actually about to take, not just what it would do on a different row.
+    fn a_hint(&self, state: &CastState) -> &'static str {
+        if self.selected == 0 {
+            if state.casting { "Stop" } else { "Start" }
+        } else {
+            "Pair"
+        }
+    }
+
     pub fn draw(&self, ui: &mut Ui, state: &CastState) {
         ui.header("Cast");
 
@@ -79,8 +94,7 @@ impl Home {
             ui.row(label, Some(">"), (i + 1) as i32, self.selected == i + 1);
         }
 
-        let action = if state.casting { "Stop" } else { "Start" };
-        ui.hints(&[("A", action), ("B", "Exit")]);
+        ui.hints(&[("A", self.a_hint(state)), ("B", "Exit")]);
     }
 }
 
@@ -153,6 +167,26 @@ mod tests {
         let mut home = Home::new();
         home.update(&down(), &state);
         assert_eq!(home.update(&a(), &state), HomeAction::Toggle);
+    }
+
+    #[test]
+    fn a_hint_tracks_the_selection() {
+        let state = CastState {
+            casting: true,
+            client: None,
+            pending: vec![PendingEntry { id: "AA".into(), name: None }],
+        };
+        let mut home = Home::new();
+        // service row selected: hint mirrors `casting`, not "Pair"
+        assert_eq!(home.a_hint(&state), "Stop");
+
+        home.update(&down(), &state);
+        // pending row selected: A pairs here, not toggles the service
+        assert_eq!(home.a_hint(&state), "Pair");
+
+        let stopped = CastState { casting: false, ..state };
+        let home = Home::new();
+        assert_eq!(home.a_hint(&stopped), "Start");
     }
 
     #[test]
