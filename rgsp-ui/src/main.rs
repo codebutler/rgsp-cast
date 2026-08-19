@@ -78,7 +78,25 @@ fn main() -> anyhow::Result<()> {
             Screen::Home(home) => match home.update(&buttons, &state) {
                 HomeAction::None => {}
                 HomeAction::Toggle => {
-                    let result = if state.casting { service.stop() } else { service.start() };
+                    let starting = !state.casting;
+                    let message = if starting { "Starting..." } else { "Stopping..." };
+                    // `service.start()`/`stop()` below block the frame loop
+                    // for up to 5s/15s (their documented timeouts) with no
+                    // way to interleave drawing, so on a handheld that reads
+                    // as a hang rather than "working" unless something is
+                    // drawn and presented *before* the call. The panel is
+                    // double-buffered, so a single begin/end only updates one
+                    // of the two buffers -- draw and present twice to make
+                    // sure the message is actually on screen, not sitting in
+                    // the buffer that won't be shown until the next flip.
+                    for _ in 0..2 {
+                        ui.begin();
+                        ui.header("Cast");
+                        ui.row("Service", Some(message), 0, true);
+                        ui.hints(&[]);
+                        ui.end();
+                    }
+                    let result = if starting { service.start() } else { service.stop() };
                     if let Err(e) = result {
                         tracing::error!("service toggle failed: {e:#}");
                     }
