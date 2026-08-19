@@ -453,4 +453,70 @@ mod pending_tests {
 			.expect("pending_changed did not fire within 1s")
 			.unwrap();
 	}
+
+	/// Plays the client's side of the whole GameStream pairing handshake
+	/// using the crate's own crypto helpers, driving `check_client_pairing_secret`
+	/// down its success path. That's the only place a client is removed from
+	/// `pending_clients`, so it's the only way to test that removal for real
+	/// rather than asserting against a call that never mutates the set.
+	#[tokio::test]
+	async fn pairing_removes_a_client_and_signals() {
+		let (server_pem, server_key_pem) = crate::tls::create_certificate().expect("generate server cert");
+		let (client_pem, client_key_pem) = crate::tls::create_certificate().expect("generate client cert");
+
+		let m = ClientManager::new(server_pem, server_key_pem).expect("construct ClientManager");
+		let id = "0011223344556677";
+		let pin = "1234";
+		let salt_bytes = salt();
+
+		m.add_pending(id.into(), client_pem.clone(), salt_bytes, Some("test-client".into()));
+		assert_eq!(m.pending_clients().len(), 1, "sanity: client is pending before pairing completes");
+
+		m.register_pin(id, pin).expect("register pin");
+		let key = create_key(&salt_bytes, pin).expect("derive key from salt and pin");
+
+		// clientchallenge: client encrypts a nonce; server returns
+		// sha256(nonce || server cert signature || server secret) || server challenge.
+		let raw_challenge = [7u8; 16];
+		let encrypted_challenge = aes_encrypt_ecb(&raw_challenge, &key).expect("encrypt challenge");
+		let challenge_response = m.client_challenge(id, encrypted_challenge).expect("client_challenge");
+		let decrypted = aes_decrypt_ecb(&challenge_response, &key).expect("decrypt challenge response");
+		let server_challenge: [u8; 16] = decrypted[32..48].try_into().expect("server challenge slice");
+
+		// serverchallengeresp: client proves it holds the key by echoing back
+		// sha256(server challenge || client cert signature || client secret payload).
+		let client_secret_payload = [9u8; 16];
+		let client_cert_signature = extract_certificate_signature(&client_pem).expect("client cert signature");
+		let mut hash_input = server_challenge.to_vec();
+		hash_input.extend_from_slice(&client_cert_signature);
+		hash_input.extend_from_slice(&client_secret_payload);
+		let client_hash = Sha256::digest(&hash_input).to_vec();
+		let encrypted_client_hash = aes_encrypt_ecb(&client_hash, &key).expect("encrypt client hash");
+		m.server_challenge_response(id, encrypted_client_hash)
+			.expect("server_challenge_response");
+
+		// clientpairingsecret: client sends its secret payload signed with its
+		// own private key, letting the server verify the certificate it was
+		// handed at the start of pairing actually belongs to this client.
+		let client_signature = sign(&client_secret_payload, &client_key_pem).expect("sign client secret payload");
+		let mut client_secret = client_secret_payload.to_vec();
+		client_secret.extend(client_signature);
+
+		let notify = m.pending_changed();
+		let waiter = tokio::spawn(async move { notify.notified().await });
+		tokio::task::yield_now().await;
+
+		m.check_client_pairing_secret(id, client_secret)
+			.expect("check_client_pairing_secret should accept a correctly signed secret");
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+			.await
+			.expect("pending_changed did not fire within 1s")
+			.unwrap();
+
+		assert!(
+			m.pending_clients().is_empty(),
+			"a client that finished pairing must not stay listed as pending"
+		);
+	}
 }
