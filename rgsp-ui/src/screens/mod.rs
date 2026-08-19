@@ -2,3 +2,4 @@
 //! `draw` method that is the only part touching [`crate::ui::Ui`].
 
 pub mod home;
+pub mod pin;
