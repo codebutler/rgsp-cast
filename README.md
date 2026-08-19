@@ -87,9 +87,6 @@ What the client negotiates, it gets:
   out, and an IDR is produced when the client asks for one, at most one per
   750 ms.
 
-A small red marker is composited into the outgoing stream so the receiving
-screen shows the cast is live. The handheld's own display is never written to.
-
 One session at a time. While casting, all handheld audio is routed to the
 client and its own speaker is silent; both are restored when casting stops.
 

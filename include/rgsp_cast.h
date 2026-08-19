@@ -41,16 +41,6 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
 /* Makes the next frame an IDR. Moonlight asks for this after packet loss. */
 void rgsp_capture_request_idr(rgsp_capture *c);
 
-/* Composites a small marker into captured frames so the receiving client can
- * see the stream is live. Does not touch the device's own display. Off by
- * default - the daemon turns it on explicitly.
- *
- * Safe to call from a different thread than rgsp_capture_next(): the flag is
- * a plain int, the same pattern already used by rgsp_capture_request_idr /
- * force_idr. A torn read costs at most one frame drawn with the stale
- * setting, which is the same tolerance that pattern already accepts. */
-void rgsp_capture_set_overlay(rgsp_capture *c, int enabled);
-
 void rgsp_capture_close(rgsp_capture *c);
 
 const char *rgsp_capture_last_error(void);

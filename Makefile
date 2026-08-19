@@ -55,21 +55,6 @@ bin/test-idr-cadence: tests/test_idr_cadence.c librgspcast.a
 		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
 		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
 
-# Includes src/rgsp-cast.c directly to reach the static draw_marker(), same
-# reason as test-vendor-overspill above. Runs entirely on the host - no
-# device, ION, or vendor libs involved.
-bin/test-draw-marker: tests/test_draw_marker.c src/rgsp-cast.c
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< -ldl'
-
-bin/test-overlay: tests/test_overlay.c librgspcast.a
-	@mkdir -p bin
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
-		sh -c 'apt-get update -qq && apt-get install -y -qq gcc >/dev/null 2>&1 && \
-		       gcc $(CFLAGS) -o $@ $< librgspcast.a -ldl'
-
 bin/rgsp-audio-pump: src/rgsp-audio-pump.c
 	@mkdir -p bin
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w $(IMAGE) \
