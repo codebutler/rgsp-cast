@@ -8,3 +8,4 @@
 pub mod bitstream;
 pub mod geometry;
 pub mod vendor_abi;
+pub mod vendor_lib;
