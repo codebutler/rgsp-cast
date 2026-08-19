@@ -17,10 +17,9 @@
 //! only gains a `mod host_source;` line and a call site, both additions
 //! upstream cannot also touch.
 
-use std::sync::Arc;
 
 use async_shutdown::ShutdownManager;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 use crate::session::manager::SessionShutdownReason;
 
@@ -115,11 +114,11 @@ pub(crate) fn spawn_pcm_bridge(
 	channels: u8,
 	frame_tx: crossbeam_channel::Sender<AudioFrame>,
 	frame_recycle_rx: crossbeam_channel::Receiver<AudioFrame>,
-	start: Arc<Notify>,
+	start: super::AudioStartGate,
 	stop: ShutdownManager<SessionShutdownReason>,
 ) {
 	tokio::spawn(async move {
-		start.notified().await;
+		start.wait().await;
 
 		// Trigger session shutdown if we exit unexpectedly.
 		let _stop_token = stop.trigger_shutdown_token(SessionShutdownReason::AudioSourceStopped);

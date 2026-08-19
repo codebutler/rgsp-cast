@@ -4,6 +4,7 @@ use async_shutdown::ShutdownManager;
 use serde::{Deserialize, Serialize};
 use strum_macros::Display;
 use tokio::net::UdpSocket;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
@@ -189,24 +190,62 @@ pub struct AudioStreamContext {
 ///
 /// The encoder and packet handler are spawned immediately but block on a `Notify`
 /// until `trigger()` is called.
-pub(crate) struct AudioStartHandle {
+/// Level-triggered start gate.
+///
+/// A bare `Notify` is edge-triggered and stores **at most one** permit, so
+/// `notify_one()` called N times before anyone awaits still releases only one
+/// waiter. Upstream had two waiters here and got away with calling it twice;
+/// this project added a third (the PCM bridge that replaced the deleted
+/// PulseAudio server), and whichever task reached its await last - the encoder,
+/// spawned last and on its own thread - could be left parked forever. The
+/// symptom is silent and logs nothing: capture runs, the bridge drains PCM,
+/// the packet handler answers the client's PINGs, and not one Opus packet is
+/// ever produced.
+///
+/// The flag makes it level-triggered: a waiter that arrives after the trigger
+/// sees `true` and proceeds without waiting at all, so neither the number of
+/// waiters nor their scheduling order can matter.
+#[derive(Clone)]
+pub(crate) struct AudioStartGate {
+	started: Arc<AtomicBool>,
 	notify: Arc<Notify>,
 }
 
+impl AudioStartGate {
+	pub(crate) fn new() -> Self {
+		Self { started: Arc::new(AtomicBool::new(false)), notify: Arc::new(Notify::new()) }
+	}
+
+	pub(crate) fn open(&self) {
+		self.started.store(true, Ordering::SeqCst);
+		self.notify.notify_waiters();
+	}
+
+	/// Resolves once the gate is open, however many tasks wait on it.
+	pub(crate) async fn wait(&self) {
+		while !self.started.load(Ordering::SeqCst) {
+			let waiting = self.notify.notified();
+			if self.started.load(Ordering::SeqCst) {
+				break;
+			}
+			waiting.await;
+		}
+	}
+}
+
+pub(crate) struct AudioStartHandle {
+	gate: AudioStartGate,
+}
+
 impl AudioStartHandle {
-	/// Signal the encoder and packet handler to begin processing.
+	/// Signal the encoder, PCM bridge and packet handler to begin processing.
 	pub fn trigger(&self) {
-		// Call notify_one() twice instead of notify_waiters() because
-		// Notify only wakes tasks already .awaiting; notify_waiters()
-		// is a no-op if no task is waiting yet.  notify_one() stores
-		// a permit so the next notified().await completes immediately.
-		self.notify.notify_one();
-		self.notify.notify_one();
+		self.gate.open();
 	}
 
 	/// Clone the start notify for external triggering (e.g. bench binary).
-	pub fn clone_start_notify(&self) -> Arc<Notify> {
-		self.notify.clone()
+	pub(crate) fn clone_start_gate(&self) -> AudioStartGate {
+		self.gate.clone()
 	}
 }
 
@@ -241,12 +280,12 @@ impl AudioStream {
 			let _ = self.udp_socket.set_tos_v4(224);
 		}
 
-		// Create the notify gate for encoder and packet handler.
-		let start_notify = Arc::new(Notify::new());
+		// Level-triggered gate shared by all three audio tasks.
+		let start_gate = AudioStartGate::new();
 
 		// Create packet channel and spawn handler — gated behind start_notify.
 		let (packet_tx, packet_rx) = mpsc::channel::<Vec<u8>>(10);
-		spawn_handle_audio_packets(packet_rx, self.udp_socket, start_notify.clone(), self.stop.clone());
+		spawn_handle_audio_packets(packet_rx, self.udp_socket, start_gate.clone(), self.stop.clone());
 
 		// Create frame channels for the audio source and encoder communication.
 		let (frame_tx, frame_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
@@ -260,7 +299,7 @@ impl AudioStream {
 			context.audio_config.channels as u8,
 			frame_tx,
 			frame_recycle_rx,
-			start_notify.clone(),
+			start_gate.clone(),
 			self.stop.clone(),
 		);
 
@@ -274,24 +313,26 @@ impl AudioStream {
 			context.encrypt_audio,
 			packet_tx,
 			self.stop.clone(),
-			start_notify.clone(),
+			start_gate.clone(),
 		)?;
 
-		Ok(AudioStartHandle { notify: start_notify })
+		Ok(AudioStartHandle { gate: start_gate })
 	}
 }
 
 fn spawn_handle_audio_packets(
 	mut packet_rx: mpsc::Receiver<Vec<u8>>,
 	socket: UdpSocket,
-	start: Arc<Notify>,
+	start: AudioStartGate,
 	stop: ShutdownManager<SessionShutdownReason>,
 ) {
 	tokio::spawn(async move {
-		start.notified().await;
+		start.wait().await;
 
 		let mut buf = [0; 1024];
 		let mut client_address = None;
+		let mut audio_packets: u32 = 0;
+		let mut last_audio_report = std::time::Instant::now();
 
 		// Trigger session shutdown when the audio packet stream stops.
 		let _stop_token = stop.trigger_shutdown_token(SessionShutdownReason::AudioPacketHandlerStopped);
@@ -302,6 +343,15 @@ fn spawn_handle_audio_packets(
 				packet = stop.wrap_cancel(packet_rx.recv()) => {
 					match packet {
 						Ok(Some(packet)) => {
+							audio_packets += 1;
+							if last_audio_report.elapsed() >= std::time::Duration::from_secs(2) {
+								tracing::info!(
+									"AUDIODIAG {audio_packets} opus packets from the encoder, client_address={:?}",
+									client_address
+								);
+								audio_packets = 0;
+								last_audio_report = std::time::Instant::now();
+							}
 							if let Some(client_address) = client_address
 								&& let Err(e) = socket.send_to(packet.as_slice(), client_address).await {
 									tracing::warn!("Failed to send packet to client: {e}");

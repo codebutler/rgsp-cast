@@ -207,7 +207,7 @@ impl LaunchedSession {
 		control_tx: mpsc::Sender<EncoderControl>,
 		pcm_rx: mpsc::Receiver<Vec<i16>>,
 		stop: ShutdownManager<SessionShutdownReason>,
-	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>), ()> {
+	) -> Result<(ActiveSession, Arc<tokio::sync::Notify>, crate::session::stream::audio::AudioStartGate), ()> {
 		let Self {
 			context,
 			audio,
@@ -239,7 +239,7 @@ impl LaunchedSession {
 
 		// Clone the start notifies for external triggering (e.g. bench binary).
 		let video_start_notify = video_handle.clone_start_notify();
-		let audio_start_notify = audio_trigger.clone_start_notify();
+		let audio_start_notify = audio_trigger.clone_start_gate();
 
 		// Keep a handle to the video stream so a resuming client can reset its
 		// frame counters (see `ActiveSession::reset_video_stream`).

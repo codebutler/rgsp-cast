@@ -108,7 +108,7 @@ struct SessionManagerInner {
 	encoder_control_rx: Option<mpsc::Receiver<EncoderControl>>,
 
 	/// Notify to trigger the audio pipeline start (used by bench / external callers).
-	audio_start_notify: Option<Arc<tokio::sync::Notify>>,
+	audio_start_notify: Option<crate::session::stream::audio::AudioStartGate>,
 
 	/// Shutdown manager for the entire application.
 	shutdown: ShutdownManager<ShutdownReason>,
@@ -284,9 +284,10 @@ impl SessionManager {
 			notify.notify_one();
 			notify.notify_one();
 		}
-		if let Some(notify) = inner.audio_start_notify.as_ref() {
-			notify.notify_one();
-			notify.notify_one();
+		// Level-triggered, so it does not matter how many audio tasks wait on
+		// it or whether they have reached their await yet. See AudioStartGate.
+		if let Some(gate) = inner.audio_start_notify.as_ref() {
+			gate.open();
 		}
 	}
 
