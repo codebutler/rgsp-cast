@@ -15,16 +15,16 @@ CFLAGS  ?= -O2 -Wall -Wextra
 
 all: bin/snd-aloop.ko
 
-# The standalone `bin/rgsp-cast` capture-only binary this deployed is gone:
-# it linked librgspcast.a, deleted with the rest of src/rgsp-cast.c. Its
-# replacement is the Rust CLI at rgsp-cedar/src/bin/rgsp-cast.rs. Task 10/11
-# should repoint deploy/run/monitor at that binary and drop this stub; until
-# then, fail loudly rather than silently scp'ing nothing to the device.
+# The standalone capture-only binary is now the Rust CLI at
+# rgsp-cedar/src/bin/rgsp-cast.rs, cross-compiled the same way `pak` builds
+# rgsp-host. It has no dependency on audiopus_sys, so no cache-busting clean
+# is needed here.
 deploy:
-	@echo "deploy: the standalone capture binary moved to the Rust CLI" >&2
-	@echo "  (rgsp-cedar/src/bin/rgsp-cast.rs) and this target was not yet" >&2
-	@echo "  repointed at it - see the comment above this recipe." >&2
-	@false
+	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/w -w /w rust:1-bookworm \
+		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev pkg-config >/dev/null 2>&1 && \
+		       cargo build --release -p rgsp-cedar --bin rgsp-cast'
+	ssh $(DEVICE) 'mkdir -p $(DESTDIR)'
+	scp -q target/release/rgsp-cast scripts/monitor.sh $(DEVICE):$(DESTDIR)/
 
 # make run DURATION=30 OUT=session.h264
 DURATION ?= 30

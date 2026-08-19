@@ -27,8 +27,9 @@ the scale to whatever resolution the client negotiates, so capture costs about
 | Protocol | GameStream, on a vendored [moonshine](https://github.com/hgaiser/moonshine) |
 | Clients | Moonlight (tvOS, macOS, iOS, Android, desktop) |
 
-A standalone capture tool (`bin/rgsp-cast`, records to a file) also exists, and
-is how the encoder is exercised without a client.
+A standalone capture tool (`rgsp-cast`, built from `rgsp-cedar/src/bin/rgsp-cast.rs`,
+records to a file) also exists, and is how the encoder is exercised without a
+client.
 
 ---
 
@@ -132,11 +133,13 @@ Per frame: read the visible framebuffer page, copy it into the encoder's ION
 input buffer, submit, drain the bitstream. The VE's ISP block does the colour
 conversion on ingest, so the CPU never touches pixel values.
 
-`rgsp-host` is the daemon. It owns capture, encoding, input injection and audio
-routing; the vendored moonshine crate owns pairing, RTSP, packetization,
-encryption and the sockets. The two meet at `host_source.rs` on the video and
-audio sides and `host_input.rs` on the control side — all host-specific logic
-lives in those files so the vendored tree stays mergeable.
+Cedar capture lives in `rgsp-cedar`, a standalone crate over the vendor VE
+libraries; `rgsp-host` consumes it. `rgsp-host` owns capture, encoding, input
+injection and audio routing; the vendored moonshine crate owns pairing, RTSP,
+packetization, encryption and the sockets. The two meet at `host_source.rs` on
+the video and audio sides and `host_input.rs` on the control side — all
+host-specific logic lives in those files so the vendored tree stays
+mergeable.
 
 Double buffering matters: the panel has a 720x960 virtual framebuffer and
 `yoffset` says which half is on screen. Reading offset 0 unconditionally — as
@@ -147,17 +150,25 @@ rather than the one being displayed.
 
 ```
 rgsp-host/                       the streaming daemon
-  src/capture.rs                 FFI wrapper over the C capture library
+  src/capture.rs                 re-export of rgsp-cedar
   src/video.rs  src/audio.rs     capture loops, pacing, ALSA loopback
   src/input.rs  src/input_decode.rs   virtual gamepad, packet decoding
   src/routing.rs                 .asoundrc swap while casting
+rgsp-cedar/                      the Cedar VE capture library (Rust)
+  src/capture.rs                 open/next/Drop over the vendor ABI
+  src/vendor_abi.rs              vencoder.h struct layouts and constants
+  src/vendor_lib.rs              dlopen'd vendor library, symbol lookup
+  src/bitstream.rs                Annex-B / AVCC bitstream handling
+  src/geometry.rs                 scale and pillarbox math
+  src/framebuffer.rs             /dev/fb0 read, double-buffer handling
+  src/convert.rs                  pixel format conversion helpers
+  src/bin/rgsp-cast.rs            standalone capture tool over the crate
+  tests/fixtures/                 recorded bitstream fixtures
 vendor/moonshine/                GameStream protocol layer (git subtree)
   .../video/host_source.rs       our video seam: packetize loop, encoder control
   .../audio/host_source.rs       our audio seam: PCM -> Opus frame bridge
   .../control/host_input.rs      our input seam: forward client input
 pak/                             NextUI pak: launch.sh (toggle), hooks, icon
-src/rgsp-cast.c                  the Cedar VE capture library (C)
-src/rgsp-cast-cli.c              standalone capture tool over that library
 scripts/install-pak.sh           install pak + hooks + vendor libs on the device
 scripts/extract-vendor-libs.sh   pull CedarC libs from TrimUI firmware
 scripts/build-snd-aloop.sh       build snd-aloop.ko for the stock kernel
@@ -189,7 +200,6 @@ Everything cross-compiles in an arm64 container; there is no toolchain on the
 device and none on the host.
 
 ```sh
-make librgspcast.a          # the C capture library
 make pak                    # the full pak, ready to install
 make test-rust              # the Rust suite, in the container
 ./tests/test_launch_sh.sh   # pak toggle behaviour
@@ -202,10 +212,6 @@ dies at startup. Without it, Opus is built from source and linked statically.
 The correct package set is `cmake clang libasound2-dev pkg-config`. This choice
 is cached in `target/`, so switching requires `cargo clean -p audiopus_sys` —
 `make pak` and `make test-rust` both do it.
-
-**After changing any C in `src/`, rebuild `librgspcast.a` before building
-`rgsp-host`.** Cargo links the archive but does not know how to rebuild it, so
-a Rust-only build silently ships the previous C code.
 
 ### Deploying
 
