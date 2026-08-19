@@ -45,6 +45,28 @@ pcm.!default {
 }
 ";
 
+/// First line of anything this project wrote to `.asoundrc`.
+///
+/// Ownership is decided by this marker, NOT by comparing the whole body, and
+/// the difference is load-bearing: `pak/hooks/pre-launch.d/10-rgsp-route.sh`
+/// writes its own copy of this config when a game launches mid-cast, and its
+/// copy has never carried the "Removed automatically" line. A byte-equality
+/// check therefore saw the hook's file as a foreign audio manager's, refused
+/// to restore, and left the handheld with no speaker audio until the next
+/// boot - reachable any time a game is launched while casting.
+///
+/// Both hooks (`pre-launch.d/10-rgsp-route.sh`, `boot.d/10-rgsp-aloop.sh`)
+/// already test exactly this marker. Matching them keeps the three in
+/// agreement about what "ours" means, and survives either copy being
+/// reworded again.
+pub const ASOUNDRC_MARKER: &str = "# rgsp-cast:";
+
+/// Whether `.asoundrc` content was written by this project (daemon or hook),
+/// as opposed to a foreign audio manager we must not clobber.
+pub fn is_ours(body: &str) -> bool {
+    body.starts_with(ASOUNDRC_MARKER)
+}
+
 /// Values from NextUI's libmsettings. Setting anything other than DEFAULT is
 /// what lights up the external-audio icon in the status pill
 /// (GFX_blitHardwareGroup, api.c:2294).
@@ -59,7 +81,16 @@ pub struct CastSink {
 impl CastSink {
     pub fn engage(userdata: &Path) -> Result<CastSink> {
         let asoundrc = userdata.join(".asoundrc");
-        let previous = std::fs::read_to_string(&asoundrc).ok();
+        // Only a FOREIGN config is worth snapshotting. If the file is already
+        // ours, it is a leftover from a previous cast that did not get to
+        // release() - a SIGKILL, or the crash window noted below. Treating it
+        // as `previous` would make release() faithfully "restore" the loopback
+        // config, so the speaker would stay silent through every subsequent
+        // clean start and stop: the fault latches and only a reboot (where
+        // boot.d/10-rgsp-aloop.sh removes the stale file) clears it.
+        let previous = std::fs::read_to_string(&asoundrc)
+            .ok()
+            .filter(|body| !is_ours(body));
 
         std::fs::write(&asoundrc, ASOUNDRC_BODY)
             .with_context(|| format!("writing {}", asoundrc.display()))?;
@@ -78,7 +109,7 @@ impl CastSink {
         // If a hotplug (e.g., Bluetooth headset) or other audio manager wrote to it
         // after we engaged, respect that change and don't restore our snapshot.
         let should_restore = if let Ok(current) = std::fs::read_to_string(&self.asoundrc) {
-            current == ASOUNDRC_BODY
+            is_ours(&current)
         } else {
             // File doesn't exist, so we can "restore" by not creating it
             self.previous.is_none()
