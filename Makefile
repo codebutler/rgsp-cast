@@ -101,11 +101,11 @@ pak: bin/snd-aloop.ko
 		sh -c 'apt-get update -qq && apt-get install -y -qq cmake clang libasound2-dev libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libsamplerate0-dev libgles-dev libclang-dev pkg-config >/dev/null 2>&1 && \
 		       cargo clean --release -p audiopus_sys && \
 		       cargo build --workspace --release'
-	cp target/release/rgsp-host $(PAKDIR)/
-	cp pak/launch.sh pak/pak.json pak/cast.png $(PAKDIR)/
+	cp target/release/rgsp-host target/release/rgsp-ui $(PAKDIR)/
+	cp pak/launch.sh pak/pak.json $(PAKDIR)/
 	cp bin/snd-aloop.ko $(PAKDIR)/
 	cp -r pak/hooks $(PAKDIR)/
-	chmod +x $(PAKDIR)/launch.sh $(PAKDIR)/rgsp-host $(PAKDIR)/hooks/*/*.sh
+	chmod +x $(PAKDIR)/launch.sh $(PAKDIR)/rgsp-host $(PAKDIR)/rgsp-ui $(PAKDIR)/hooks/*/*.sh
 	@echo "-> $(PAKDIR)"
 	@echo "   lib/h700 is populated on the device at install time"
 

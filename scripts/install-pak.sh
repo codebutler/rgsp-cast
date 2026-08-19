@@ -24,7 +24,7 @@ for phase in boot pre-launch pre-sleep post-resume; do
         scp -q "$f" "$DEVICE:$HOOKS/$phase.d/"
     done
 done
-ssh "$DEVICE" "chmod +x $DEST/launch.sh $DEST/rgsp-host $HOOKS/*/*.sh"
+ssh "$DEVICE" "chmod +x $DEST/launch.sh $DEST/rgsp-host $DEST/rgsp-ui $HOOKS/*/*.sh"
 
 # Vendor libraries, fetched here and pushed, never committed.
 if [ ! -d "$HERE/../vendor-libs" ]; then
@@ -40,6 +40,6 @@ cat <<EOF
 Installed to $DEST
 Hooks installed to $HOOKS
 
-Launch it from Tools -> Cast. It toggles: once to start, again to stop.
-Pair from Moonlight, then open the URL shown on screen in a browser.
+Launch it from Tools -> Cast. Pair from Moonlight; the PIN prompt is on
+the device now, not a browser.
 EOF
