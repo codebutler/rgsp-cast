@@ -288,8 +288,12 @@ impl AudioStream {
 		spawn_handle_audio_packets(packet_rx, self.udp_socket, start_gate.clone(), self.stop.clone());
 
 		// Create frame channels for the audio source and encoder communication.
-		let (frame_tx, frame_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
-		let (frame_recycle_tx, frame_recycle_rx) = crossbeam_channel::bounded::<AudioFrame>(3);
+		// 3 frames is 15 ms of audio - too tight to absorb any scheduling
+		// jitter on this device, and the bridge drops whatever does not fit.
+		// 16 frames is 80 ms, still well under the video pipeline's own
+		// latency, and gives the encoder room to catch up after a hiccup.
+		let (frame_tx, frame_rx) = crossbeam_channel::bounded::<AudioFrame>(16);
+		let (frame_recycle_tx, frame_recycle_rx) = crossbeam_channel::bounded::<AudioFrame>(16);
 
 		// Bridge host-supplied i16 PCM (`pcm_rx`) into `AudioFrame`s for the
 		// encoder — gated behind start_notify. Replaces the deleted

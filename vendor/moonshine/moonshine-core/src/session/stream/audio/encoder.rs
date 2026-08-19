@@ -66,6 +66,18 @@ impl AudioEncoder {
 			.set_bitrate(opus::Bitrate::Bits(stream_config.bitrate as i32))
 			.map_err(|e| tracing::warn!("Failed to set audio bitrate: {e}"))?;
 
+		// libopus defaults to complexity 10, its most expensive setting. That
+		// is a fine default on the desktop this code came from; here the same
+		// cores are simultaneously capturing and H.264-encoding video, and the
+		// encoder fell far enough behind to discard roughly one 5 ms frame in
+		// six - not a glitch under load but a steady ~16% of the audio,
+		// dropped silently, which is heard as constant crackle. Complexity 5
+		// is a large speedup for a difference that is inaudible at this
+		// bitrate on a handheld's game audio.
+		if let Err(e) = encoder.set_complexity(5) {
+			tracing::warn!("Failed to set audio encoder complexity: {e}");
+		}
+
 		let fec_encoder = ReedSolomon::new(NR_DATA_SHARDS, NR_PARITY_SHARDS)
 			.map_err(|e| tracing::warn!("Failed to create FEC encoder: {e}"))?;
 

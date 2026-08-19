@@ -75,6 +75,8 @@ fn build_frame(
 /// Hand a built frame to the encoder, stashing it as `spare_frame` instead of
 /// dropping it if the channel is full — same tradeoff the deleted PulseAudio
 /// server made: keep the allocation, drop the (now stale) samples instead.
+static DROPPED_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Returns `false` once the encoder has disconnected and the bridge should stop.
 fn send_frame(
 	frame_tx: &crossbeam_channel::Sender<AudioFrame>,
@@ -84,6 +86,15 @@ fn send_frame(
 	match frame_tx.try_send(frame) {
 		Ok(()) => true,
 		Err(crossbeam_channel::TrySendError::Full(frame)) => {
+			// The encoder is behind and this 5 ms of audio is discarded. That
+			// is audible: a dropped frame is a hole in the waveform, and a
+			// steady trickle of them is the crackle/stutter a listener
+			// reports as "choppy". Count them - silently losing audio with no
+			// diagnostic is how this went unnoticed.
+			let n = DROPPED_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+			if n == 1 || n % 100 == 0 {
+				tracing::warn!("audio encoder behind: {n} PCM frame(s) dropped (5 ms each)");
+			}
 			*spare_frame = Some(frame);
 			true
 		},
