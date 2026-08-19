@@ -360,6 +360,19 @@ to compile if a subtree pull reverts them.
 
 ## Vendor libraries
 
+CedarC is Allwinner's closed-source userspace runtime for Cedar, the video
+engine baked into the SoC. The kernel driver (`/dev/cedar_dev`) only hands out
+register access and interrupts; everything that makes the block usable —
+programming the encoder, the ISP colour conversion and scaler, rate control,
+the ION/IOMMU buffer plumbing — lives in these `.so` files. There is no
+V4L2 M2M driver on this 4.9 kernel and no open replacement that supports this
+silicon, so the host `dlopen`s `libvencoder.so` and calls the vendor ABI
+directly. Without them there is no hardware encoding, and software H.264 on
+four Cortex-A53s cannot hold 720x480 at frame rate while an emulator runs.
+
+They are proprietary, they cannot be redistributed here, and — the awkward part
+— they do not ship on the device this project targets:
+
 **Anbernic's own firmware ships no CedarC runtime at all.** Mounting the stock
 image shows `libVE.so`, `libMemAdapter.so`, `libcdc_base.so` and
 `libvdecoder.so` are absent; the only trace is a dangling `DT_NEEDED` reference
