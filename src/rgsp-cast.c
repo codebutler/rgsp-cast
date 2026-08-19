@@ -67,6 +67,35 @@ static void set_error(const char *fmt, ...)
 
 const char *rgsp_capture_last_error(void) { return g_last_error; }
 
+/* TEMPORARY: golden-fixture capture for the Rust port, deleted with this file.
+ *
+ * The AVCC->Annex-B conversion, the NAL classification and the avcC parsing
+ * have never had tests, and they are exactly what a port breaks silently. The
+ * bytes they consume only exist inside this process, so dump them once and
+ * test the Rust against them off-device.
+ *
+ *   RGSP_DUMP_FIXTURES=<dir>   enable, writing into <dir>
+ *   RGSP_DUMP_FRAMES=<n>       how many frames to dump (default 8)
+ */
+static const char *dump_dir(void) { return getenv("RGSP_DUMP_FIXTURES"); }
+
+static int dump_limit(void)
+{
+    const char *n = getenv("RGSP_DUMP_FRAMES");
+    return n ? atoi(n) : 8;
+}
+
+static void dump_blob(const char *name, const void *p, size_t n)
+{
+    const char *d = dump_dir();
+    char path[512];
+    FILE *f;
+
+    if (!d || !p || !n) return;
+    snprintf(path, sizeof path, "%s/%s", d, name);
+    if ((f = fopen(path, "wb"))) { fwrite(p, 1, n, f); fclose(f); }
+}
+
 void rgsp_capture_set_verbose(int v) { g_verbose = v; }
 
 /* ── vendor ABI ──────────────────────────────────────────────────────────── */
@@ -550,6 +579,9 @@ static unsigned fetch_sps_pps(VideoEncoder *enc, ScMemOpsS *memops,
     }
     if (!p) return 0;
 
+    /* TEMPORARY — see dump_blob(). The raw avcC record, before conversion. */
+    dump_blob("avcc_record.bin", p, hdr.nLength);
+
     /* The library hands back an AVCDecoderConfigurationRecord (avcC), not
      * Annex-B:
      *   01 <profile> <compat> <level> <ff|lengthSizeMinusOne>
@@ -982,6 +1014,14 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
             break;
         }
 
+        /* TEMPORARY — see dump_blob(). Exactly what the vendor handed back,
+         * before any Annex-B conversion. Paired with frameNNN_expected.bin. */
+        if (c->frames < dump_limit() && o->pData0 && o->nTotalSize) {
+            char nm[64];
+            snprintf(nm, sizeof nm, "frame%03d_raw.bin", c->frames);
+            dump_blob(nm, o->pData0, o->nTotalSize);
+        }
+
         /* The vendor exposes the frame as up to two segments of a ring
          * buffer (pData0/nSize0 + pData1/nSize1), with nTotalSize the sum.
          * Only trust the split when it adds up; otherwise treat pData0 as
@@ -1034,6 +1074,15 @@ int rgsp_capture_next(rgsp_capture *c, const unsigned char **data,
         memmove(c->out_buf + c->sps_pps_len, c->out_buf, c->out_len);
         memcpy(c->out_buf, c->sps_pps, c->sps_pps_len);
         c->out_len += c->sps_pps_len;
+    }
+
+    /* TEMPORARY — see dump_blob(). c->frames was incremented above, so the
+     * frame just produced is c->frames - 1; that pairs this with the
+     * frameNNN_raw.bin dumped during the drain loop. */
+    if (c->frames - 1 < dump_limit()) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "frame%03d_expected.bin", c->frames - 1);
+        dump_blob(nm, c->out_buf, c->out_len);
     }
 
     if (data)        *data = c->out_buf;
