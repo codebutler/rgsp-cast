@@ -156,7 +156,8 @@ vendor/moonshine/                GameStream protocol layer (git subtree)
   .../audio/host_source.rs       our audio seam: PCM -> Opus frame bridge
   .../control/host_input.rs      our input seam: forward client input
 pak/                             NextUI pak: launch.sh (toggle), hooks, icon
-src/rgsp-cast.c                  the capture library and standalone tool
+src/rgsp-cast.c                  the Cedar VE capture library (C)
+src/rgsp-cast-cli.c              standalone capture tool over that library
 scripts/install-pak.sh           install pak + hooks + vendor libs on the device
 scripts/extract-vendor-libs.sh   pull CedarC libs from TrimUI firmware
 scripts/build-snd-aloop.sh       build snd-aloop.ko for the stock kernel

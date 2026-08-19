@@ -9,3 +9,4 @@ librgspcast.a
 *.log
 .DS_Store
 vendor/moonshine/moonshine-core/Cargo.lock
+docs/superpowers/
