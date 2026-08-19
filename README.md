@@ -678,6 +678,54 @@ Do not retry these without new information.
 
 ---
 
+## Licensing
+
+**The shipped pak is GPLv3.** `rgsp-ui` statically compiles NextUI's C sources
+(`api.c`, `utils.c`, `config.c`, `scaler.c`, `platform.c`, `msettings.c`, and
+the files their headers and `#include`s pull in) directly into its binary.
+There is no shared library to link against — every NextUI app compiles
+`common/api.c` itself — so this is a derivative work, not dynamic linking, and
+the whole pak inherits NextUI's licence. `rgsp-ui/Cargo.toml` declares
+`license = "GPL-3.0-or-later"` accordingly.
+
+`rgsp-cedar` and the capture path are unaffected: they link nothing from
+NextUI. `rgsp-cedar/src/vendor_abi.rs` is hand-transcribed from libcedarc's
+`vencoder.h` rather than generated from it, specifically because that header
+is GPLv3 and this keeps it out of the tree.
+
+**Vendored components:**
+
+| Path | Upstream | Licence | Why vendored |
+|---|---|---|---|
+| `rgsp-ui/vendor/nextui/` | [pvaibhav/NextUI](https://github.com/pvaibhav/NextUI) (h700 port fork), pinned to `39745aeefbc4993dbb4352065fe100a8f6faf1f7`, tag `h700-rc8` (2026-08-09) | GPLv3 | The NextUI C toolkit `rgsp-ui` links statically; see above. |
+| `rgsp-ui/vendor/tinyalsa/` | [tinyalsa](https://github.com/tinyalsa/tinyalsa), tag `1.1.1`, commit `df11091086b56e5fb71887f2fa320e1d2ffeff58` | BSD-3-Clause (© 2011 The Android Open Source Project) | `msettings.c` needs thirteen `mixer_*` symbols and Debian bookworm ships no `tinyalsa` package. BSD composes into GPLv3 without friction; the upstream `NOTICE` text is copied verbatim into `PROVENANCE.md` there. |
+| `vendor/reth-ipc/` | [reth](https://github.com/paradigmxyz/reth), commit `df69a6ac99af6e2f29461a5695b0b7df36919627` | MIT OR Apache-2.0 |  |
+| `vendor/moonshine/` | [hgaiser/moonshine](https://github.com/hgaiser/moonshine) | BSD-2-Clause (© 2024 Hans Gaiser) |  |
+
+Each vendored tree carries a `PROVENANCE.md` (or, for moonshine, its own
+`LICENSE`) recording the exact upstream ref and licence text at that commit.
+
+**Do not bump the NextUI pin without a licence review.** Upstream relicensed
+from GPLv3 to PolyForm Noncommercial 1.0.0 on 2026-08-15 (commit `ae65264`,
+PR #806). PolyForm Noncommercial is not an open-source licence — it forbids
+commercial use and cannot be combined with GPLv3. Our pin predates that commit
+by six days and `git merge-base --is-ancestor` confirms it is not a descendant
+of the relicense, so what's vendored here is genuinely, unrevocably GPLv3. But
+that guarantee is specific to this exact ref: pulling a newer NextUI commit
+would pull PolyForm-licensed code into a GPLv3 pak, which does not compose.
+Treat any NextUI update as a licensing decision, not a routine dependency
+bump. (Whether the `pvaibhav` fork itself inherits the upstream relicense
+downstream of `ae65264` has not been assessed — open question, not settled
+either way.) Full detail is in `rgsp-ui/vendor/nextui/PROVENANCE.md`.
+
+**Source availability.** GPLv3 §6 obligates offering corresponding source to
+anyone who receives the binary. That obligation is satisfied by this
+repository: the NextUI sources `rgsp-ui` compiles against are vendored
+unmodified at `rgsp-ui/vendor/nextui/`, not merely referenced, so the exact
+source shipped in the pak is checked in here alongside it.
+
+---
+
 ## Credits
 
 - [carroarmato0/allwinner-cedar-tools](https://github.com/carroarmato0/allwinner-cedar-tools)
