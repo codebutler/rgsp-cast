@@ -60,7 +60,7 @@ impl Confirm {
     }
 
     pub fn draw(&self, ui: &mut Ui) {
-        ui.full_screen_message(&format!("Unpair {}? It will need to pair again to reconnect.", self.label));
+        ui.full_screen_message(&format!("Unpair {}?", self.label));
         ui.hints(&[("A", "Unpair"), ("B", "Cancel")]);
     }
 }

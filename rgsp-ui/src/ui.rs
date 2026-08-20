@@ -499,7 +499,17 @@ impl Ui {
     /// offers (`B Back` or `B Cancel`), matching `ledcontrol.c`'s own
     /// `GFX_blitButtonGroup` call immediately after its `GFX_blitMessage`.
     pub fn full_screen_message(&mut self, text: &str) {
-        self.blit_message(text, SDL_Rect { x: 0, y: 0, w: self.w, h: self.h });
+        // Inset horizontally: `GFX_blitMessage` centres within the rect it is
+        // given but does **not** wrap -- it only splits on '\n' (api.c:2120)
+        // -- so a line wider than the rect runs off both edges and stops
+        // looking centred at all. The padding keeps a long device name off
+        // the panel edges; keeping these messages to one short sentence is
+        // what keeps them inside it.
+        let pad = sys::scale1(PADDING);
+        self.blit_message(
+            text,
+            SDL_Rect { x: pad, y: 0, w: self.w - pad * 2, h: self.h },
+        );
     }
 
     /// Draw the button-hint bar, e.g. `[("A", "OK"), ("B", "BACK")]`.
