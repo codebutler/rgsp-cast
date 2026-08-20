@@ -3,7 +3,6 @@
 
 pub mod home;
 pub mod message;
-pub mod pairing;
 pub mod pin;
 
 /// Label a client for the pairing UI: a real name if one ever arrives,

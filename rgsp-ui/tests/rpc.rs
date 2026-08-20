@@ -91,7 +91,7 @@ fn snapshot_arrives_on_subscribe_and_submit_pin_round_trips() {
     assert!(!snapshot.casting);
     assert!(snapshot.pending.is_empty());
 
-    let outcome = submit_pin_blocking(&mut control, "some-client-id", "1234").expect("submit_pin");
+    let outcome = control.submit_pin("some-client-id", "1234").expect("submit_pin");
     assert_eq!(outcome, PinOutcome::Paired);
     assert!(control.is_connected());
 }
@@ -120,7 +120,7 @@ fn a_transport_failure_marks_the_connection_dead() {
     server.stop().expect("stop server");
     runtime.block_on(server.stopped());
 
-    let result = submit_pin_blocking(&mut control, "some-id", "0000");
+    let result = control.submit_pin("some-id", "0000");
     assert!(result.is_err(), "a dead server must not look like a successful (or even a rejected) pairing");
     assert!(!control.is_connected(), "a transport failure, unlike an RPC error, must mark the client disconnected");
 }
@@ -158,23 +158,6 @@ async fn start_pin_error_server(
 
     let server = reth_ipc::server::Builder::default().build(path.to_string());
     server.start(module).await.expect("start server")
-}
-
-/// Drives `start_submit_pin`/`poll_submit_pin` to completion the way the
-/// real frame loop would: `submit_pin` used to be one blocking call, and is
-/// now a start-then-poll-every-frame split, so tests poll on a tight loop
-/// instead. The ceiling (7s) sits comfortably above `SUBMIT_PIN_TIMEOUT`
-/// (5s) so a genuine timeout still resolves within it rather than panicking
-/// here as a false test failure.
-fn submit_pin_blocking(control: &mut Control, id: &str, pin: &str) -> anyhow::Result<PinOutcome> {
-    control.start_submit_pin(id, pin);
-    for _ in 0..700 {
-        if let Some(result) = control.poll_submit_pin() {
-            return result;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    panic!("submit_pin did not resolve within 7s");
 }
 
 /// Connects and drains the initial snapshot so the caller starts from a
@@ -217,15 +200,13 @@ fn submit_pin_distinguishes_not_ready_from_rejected() {
     ));
 
     let mut not_ready_control = connected_control(&not_ready_path);
-    let outcome =
-        submit_pin_blocking(&mut not_ready_control, "some-id", "0000").expect("not-ready is not a transport error");
+    let outcome = not_ready_control.submit_pin("some-id", "0000").expect("not-ready is not a transport error");
     assert_eq!(outcome, PinOutcome::NotReady);
     assert!(not_ready_called.load(Ordering::SeqCst));
     assert!(not_ready_control.is_connected(), "a live daemon's answer must not look like a dead connection");
 
     let mut rejected_control = connected_control(&rejected_path);
-    let outcome =
-        submit_pin_blocking(&mut rejected_control, "some-id", "9999").expect("rejected is not a transport error");
+    let outcome = rejected_control.submit_pin("some-id", "9999").expect("rejected is not a transport error");
     assert_eq!(outcome, PinOutcome::Rejected);
     assert!(rejected_called.load(Ordering::SeqCst));
     assert!(rejected_control.is_connected(), "a live daemon's answer must not look like a dead connection");
