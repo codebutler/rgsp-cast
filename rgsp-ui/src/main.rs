@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use rgsp_ui::rpc::{CastState, Control, PinOutcome};
 use rgsp_ui::screens::home::{Home, HomeAction};
 use rgsp_ui::screens::message::Message;
+use rgsp_ui::screens::pairing::{self, PairingAction};
 use rgsp_ui::screens::pin::{Pin, PinAction};
 use rgsp_ui::service::Service;
 use rgsp_ui::ui::Ui;
@@ -50,6 +51,11 @@ fn pak_dir() -> PathBuf {
 enum Screen {
     Home(Home),
     Pin(Pin),
+    /// A PIN submitted; waiting on the daemon's answer
+    /// ([`Control::poll_submit_pin`]). Carries the `Pin` it was entered
+    /// from so a `NotReady` answer can return to it with the typed digits
+    /// still in place, rather than making the user retype them.
+    Pairing(Pin),
     /// A pairing attempt ended (rejected, or the connection was lost) and
     /// there is nothing left to do but tell the user and wait for `B`.
     Message(Message),
@@ -120,11 +126,11 @@ fn main() -> anyhow::Result<()> {
         // other buffer goes stale and visibly wrong.
         ui.begin();
 
-        // Every arm produces the screen for *this* frame's draw below -- an
-        // owned match on `screen` itself, not `&mut screen` plus a side
-        // `next_screen` slot, so a transition can move the struct it's
-        // carrying (e.g. `Pin`'s typed-in digits) into the new state
-        // instead of rebuilding it from scratch.
+        // Every arm produces the screen for *this* frame's draw below --
+        // an owned match on `screen` itself, not `&mut screen` plus a side
+        // `next_screen` slot, so a transition (e.g. `Pin` -> `Pairing`) can
+        // move the struct it's carrying (the typed-in digits) into the new
+        // state instead of rebuilding it from scratch.
         screen = match screen {
             Screen::Home(mut home) => match home.update(&buttons, &state) {
                 HomeAction::None => Screen::Home(home),
@@ -135,24 +141,19 @@ fn main() -> anyhow::Result<()> {
                     // for up to 5s/15s (their documented timeouts) with no
                     // way to interleave drawing, so on a handheld that reads
                     // as a hang rather than "working" unless something is
-                    // drawn and presented *before* the call. One begin/end
-                    // is enough: `PLAT_flip` (`generic_video.c:1657`)
-                    // uploads the whole surface and presents on every call,
-                    // so there is no alternating half-drawn buffer to worry
-                    // about -- draw once, flip once. (An earlier version of
-                    // this drew and presented twice, on the theory that the
-                    // panel needed both buffers refreshed; that theory was
-                    // wrong -- the blank captures that suggested it came
-                    // from `scripts/screenshot.sh` reading `/dev/fb0` at a
-                    // fixed offset while the visible page is whichever
-                    // `yoffset` selects, a bug in the capture tool, since
-                    // fixed, not in the display.)
-                    ui.begin();
-                    let chrome_w = ui.hardware_group();
-                    ui.header("Cast", chrome_w);
-                    ui.row("Service", Some(message), 0, true);
-                    ui.hints(&[]);
-                    ui.end();
+                    // drawn and presented *before* the call. The panel is
+                    // double-buffered, so a single begin/end only updates one
+                    // of the two buffers -- draw and present twice to make
+                    // sure the message is actually on screen, not sitting in
+                    // the buffer that won't be shown until the next flip.
+                    for _ in 0..2 {
+                        ui.begin();
+                        let chrome_w = ui.hardware_group();
+                        ui.header("Cast", chrome_w);
+                        ui.row("Service", Some(message), 0, true);
+                        ui.hints(&[]);
+                        ui.end();
+                    }
                     let result = if starting { service.start() } else { service.stop() };
                     if let Err(e) = result {
                         tracing::error!("service toggle failed: {e:#}");
@@ -180,49 +181,57 @@ fn main() -> anyhow::Result<()> {
                 PinAction::Back => Screen::Home(Home::new()),
                 PinAction::Submit(code) => {
                     let id = pin.client_id().to_string();
-                    // `submit_pin` below blocks the frame loop for up to
-                    // `SUBMIT_PIN_TIMEOUT` (5s) with no way to interleave
-                    // drawing -- draw and present the full-screen
-                    // "Pairing…" message *before* making the call, same
-                    // reasoning as `HomeAction::Toggle` above (one
-                    // begin/end is enough; see its comment). No button
-                    // group: while blocked, `Ui::poll()` never runs, so a
-                    // `B Cancel` drawn here would do nothing until the call
-                    // already returned on its own -- showing no button is
-                    // the honest answer to "can the user act right now",
-                    // not a fake one. A non-blocking submit (start/poll, a
-                    // genuine Cancel) was built and then reverted -- the
-                    // owner preferred no button over the extra concurrency
-                    // it required.
-                    ui.begin();
-                    ui.full_screen_message("Pairing...");
-                    ui.hints(&[]);
-                    ui.end();
-                    match control.as_mut().map(|c| c.submit_pin(&id, &code)) {
-                        Some(Ok(PinOutcome::Paired)) => Screen::Home(Home::new()),
-                        // Transient: the daemon is still starting up, not a
-                        // bad PIN. The same PIN will work shortly, so
-                        // return to the digits already typed rather than a
-                        // terminal screen.
-                        Some(Ok(PinOutcome::NotReady)) => {
-                            pin.set_error("Not ready yet, try again");
-                            Screen::Pin(pin)
+                    match control.as_mut() {
+                        Some(c) => {
+                            // Non-blocking: `start_submit_pin` returns
+                            // immediately, so the frame loop keeps running
+                            // and `Screen::Pairing`'s own "Pairing..." /
+                            // `B Cancel` gets drawn and stays live, unlike
+                            // the old blocking call this replaced.
+                            c.start_submit_pin(&id, &code);
+                            Screen::Pairing(pin)
                         }
-                        // Wrong PIN: Moonlight has usually already given up
-                        // on this attempt by the time the daemon can tell
-                        // us it was wrong, so there is nothing left to
-                        // retry here -- the user re-initiates pairing from
-                        // Moonlight.
-                        Some(Ok(PinOutcome::Rejected)) => {
-                            Screen::Message(Message::new("Wrong PIN. Pair again from Moonlight."))
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!("submit_pin failed: {e:#}");
-                            Screen::Message(Message::new("Connection lost."))
-                        }
+                        // Nothing to submit to; there is no request in
+                        // flight to wait on, so this is a terminal state,
+                        // not a `Pairing` screen with nothing behind it.
                         None => Screen::Message(Message::new("Not connected to the service.")),
                     }
                 }
+            },
+            Screen::Pairing(pin) => match pairing::update(&buttons) {
+                PairingAction::Cancel => {
+                    // Does not un-submit the PIN -- see
+                    // `Control::cancel_submit_pin`'s doc comment. The user
+                    // just stops waiting on an answer; Home shows whatever
+                    // is actually still pending.
+                    if let Some(c) = control.as_mut() {
+                        c.cancel_submit_pin();
+                    }
+                    Screen::Home(Home::new())
+                }
+                PairingAction::None => match control.as_mut().and_then(Control::poll_submit_pin) {
+                    None => Screen::Pairing(pin), // still waiting
+                    Some(Ok(PinOutcome::Paired)) => Screen::Home(Home::new()),
+                    // Transient: the daemon is still starting up, not a bad
+                    // PIN. The same PIN will work shortly, so return to the
+                    // digits already typed rather than a terminal screen.
+                    Some(Ok(PinOutcome::NotReady)) => {
+                        let mut pin = pin;
+                        pin.set_error("Not ready yet, try again");
+                        Screen::Pin(pin)
+                    }
+                    // Wrong PIN: Moonlight has already given up on this
+                    // attempt by the time the daemon can tell us it was
+                    // wrong, so there is nothing left to retry here -- the
+                    // user re-initiates pairing from Moonlight.
+                    Some(Ok(PinOutcome::Rejected)) => {
+                        Screen::Message(Message::new("Wrong PIN. Pair again from Moonlight."))
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!("submit_pin failed: {e:#}");
+                        Screen::Message(Message::new("Connection lost."))
+                    }
+                },
             },
             Screen::Message(message) => {
                 if message.update(&buttons) {
@@ -236,6 +245,7 @@ fn main() -> anyhow::Result<()> {
         match &screen {
             Screen::Home(home) => home.draw(&mut ui, &state, connected),
             Screen::Pin(pin) => pin.draw(&mut ui),
+            Screen::Pairing(_) => pairing::draw(&mut ui),
             Screen::Message(message) => message.draw(&mut ui),
         }
         ui.end();
