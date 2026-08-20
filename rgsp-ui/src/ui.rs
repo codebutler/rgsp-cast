@@ -31,6 +31,22 @@ const COLOR_BLACK: SDL_Color = SDL_Color { r: 0x00, g: 0x00, b: 0x00, a: 0 };
 /// `Ui` that exists.
 const PADDING: i32 = 10;
 
+/// NextUI's `MAIN_ROW_COUNT` (`defines.h:64`: `FIXED_HEIGHT / (PILL_SIZE *
+/// FIXED_SCALE) - 2`, i.e. how many `PILL_SIZE`-tall rows fit once the top
+/// status band and the bottom hint band are reserved). Not bound from C for
+/// the same reason `PADDING` above is not: `h700/platform.h:175` redefines
+/// it as `(hdmi_active||is_cube)?10:6`, a runtime expression.
+///
+/// `6` is provably the only value it can take here, by the same argument as
+/// `PADDING`'s: `Ui::new()` already rejects any surface that is not
+/// 720x480, which per `h700/platform.h:162-163` rules out both `hdmi_active`
+/// and `is_cube`, so `MAIN_ROW_COUNT == 6` for every `Ui` that exists.
+///
+/// A screen's own header/title row (drawn via [`Ui::header`]) is not one of
+/// these — this bounds rows drawn through [`Ui::row`] at [`row_y`]
+/// positions.
+pub const MAIN_ROW_COUNT: i32 = 6;
+
 /// NextUI clock.c's digit-atlas cell size, unscaled (`clock.c:31-32`). Ours:
 /// the PIN entry is not a stock NextUI widget, but the owner asked for the
 /// same number-entry UI as clock's date/time fields, and this is the cell
@@ -71,26 +87,34 @@ impl Buttons {
     }
 }
 
+/// The reserved top band every screen's content must clear, in scaled
+/// pixels: `header()`'s title and `Ui::hardware_group()`'s status pill
+/// occupy `scale1(PADDING)..scale1(PADDING + PILL_SIZE)`, and NextUI's own
+/// convention leaves `BUTTON_MARGIN` of breathing room below that before any
+/// content — `nextui.c:2712-2714`'s own comment names it: `"top pill area:
+/// PADDING + PILL_SIZE + BUTTON_MARGIN"`, used at `nextui.c:2728` as `oy =
+/// SCALE1(PADDING + PILL_SIZE + BUTTON_MARGIN) + ...`. Composed from the
+/// named constants, not hardcoded, so it tracks if any of them change.
+fn header_band_height() -> i32 {
+    sys::scale1(PADDING + sys::PILL_SIZE as i32 + sys::BUTTON_MARGIN as i32)
+}
+
 /// Vertical position of row `index`, in scaled pixels. A free function, not
 /// a method, so it stays unit-testable without an open display.
 ///
-/// Offset by `scale1(PADDING)` below the header band: `header()` draws its
-/// title at `y = scale1(PADDING)`, and `Ui::hardware_group()` (the
-/// battery/wifi/bt status pill every screen now draws) occupies the same
-/// `scale1(PADDING)..scale1(PADDING) + scale1(PILL_SIZE)` band. Without the
-/// offset, row 0 started at `scale1(PILL_SIZE)` — 20px inside that band —
-/// and its pill visibly overlapped both on hardware.
+/// Row 0 starts at [`header_band_height`], clearing the header/status band;
+/// each following row steps by `scale1(PILL_SIZE)`, contiguous with no
+/// extra gap, the same as `nextui.c`'s own file-browser list
+/// (`SCALE1(row_index * PILL_SIZE + PADDING)` — that screen has no header
+/// band to clear, so its row 0 starts right at `scale1(PADDING)` instead of
+/// [`header_band_height`], but the per-row step is identical).
 ///
-/// `nextui.c`'s own file browser positions its rows the same way,
-/// `SCALE1(row_index * PILL_SIZE + PADDING)`, but that screen has no
-/// separate header band to clear — its row 0 sits at `scale1(PADDING)`
-/// (20px), level with its own hardware group, because that list is the
-/// only content on the screen. Ours is not: `header()`'s title text
-/// occupies the same band `hardware_group()` does, so row 0 has to clear
-/// a full `scale1(PADDING) + scale1(PILL_SIZE)` (80px) before it, one
-/// `scale1(PADDING)` further down than that reference.
+/// Before `header_band_height` existed here, row 0 was `scale1(PILL_SIZE)`
+/// — 20px inside the header/status band — and its pill visibly overlapped
+/// both `header()`'s title and `hardware_group()`'s status pill on
+/// hardware.
 fn row_y(index: i32) -> i32 {
-    sys::scale1(PADDING) + sys::scale1(sys::PILL_SIZE as i32) * (index + 1)
+    header_band_height() + sys::scale1(sys::PILL_SIZE as i32) * index
 }
 
 /// The open NextUI display, and everything acquired to open it.
@@ -483,11 +507,11 @@ mod tests {
 
     #[test]
     fn row_y_starts_below_the_header_band() {
-        // The header band -- header()'s title and hardware_group()'s
-        // status pill -- occupies scale1(PADDING)..scale1(PADDING +
-        // PILL_SIZE). Row 0 must start at its bottom edge, not overlap it.
-        let header_band_bottom = crate::sys::scale1(PADDING) + crate::sys::scale1(crate::sys::PILL_SIZE as i32);
-        assert_eq!(row_y(0), header_band_bottom);
+        // The reserved top band -- header()'s title, hardware_group()'s
+        // status pill, and NextUI's own BUTTON_MARGIN breathing room below
+        // both -- is PADDING + PILL_SIZE + BUTTON_MARGIN (nextui.c:2712-2714).
+        // Row 0 must start at its bottom edge, not overlap it.
+        assert_eq!(row_y(0), header_band_height());
     }
 
     #[test]

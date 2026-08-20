@@ -20,6 +20,23 @@ pub enum HomeAction {
     Exit,
 }
 
+/// How many rows — the service row plus pending rows — actually get drawn.
+/// Capped at [`crate::ui::MAIN_ROW_COUNT`]: NextUI reserves that many
+/// `PILL_SIZE` rows total once the top status band and bottom hint band are
+/// accounted for, and drawing past it would run rows under the hint group
+/// and off the bottom of the panel. No scrolling: realistically there is
+/// one pending client, occasionally two, so simply not drawing past the cap
+/// is enough — a client beyond it just has no row until an earlier one
+/// clears (paired or abandoned), the same as it would if it hadn't
+/// connected yet.
+///
+/// A free function, not a method, so both [`Home::update`] (to clamp the
+/// cursor) and [`Home::draw`] (to cap the loop) call the exact same
+/// computation — they can never disagree about how many rows exist.
+fn visible_row_count(state: &CastState) -> usize {
+    (1 + state.pending.len()).min(crate::ui::MAIN_ROW_COUNT as usize)
+}
+
 /// The home screen's cursor position. Just an index into a list that is
 /// reconstructed from `state` on every call — there is nothing else to
 /// track, and keeping no cached copy of the list is what makes clamping
@@ -41,14 +58,16 @@ impl Home {
     /// two frames while the cursor still sits on that row, so clamping
     /// against a remembered row count would let `A` act on a row that no
     /// longer exists. Clamping against the row count `state` reports *right
-    /// now* is what makes that impossible.
+    /// now* is what makes that impossible. That row count is also capped at
+    /// [`visible_row_count`] — the cursor must never land on a row `draw`
+    /// does not actually draw, on-screen or off.
     ///
     /// `A` on the service row always returns `Toggle` — which direction
     /// that means (start vs. stop) is decided by the caller from socket
     /// connectivity, not here; see [`Home::a_hint`] and [`Home::status_text`]
     /// for where connectivity actually changes what's shown.
     pub fn update(&mut self, buttons: &Buttons, state: &CastState) -> HomeAction {
-        let row_count = 1 + state.pending.len();
+        let row_count = visible_row_count(state);
         if self.selected >= row_count {
             self.selected = row_count - 1;
         }
@@ -118,7 +137,10 @@ impl Home {
         let status = Self::status_text(state, connected);
         ui.row("Service", Some(&status), 0, self.selected == 0);
 
-        for (i, entry) in state.pending.iter().enumerate() {
+        // The service row above already claimed one of visible_row_count's
+        // slots, so at most `visible_row_count(state) - 1` pending rows fit.
+        let max_pending_rows = visible_row_count(state) - 1;
+        for (i, entry) in state.pending.iter().enumerate().take(max_pending_rows) {
             let label = crate::screens::client_label(entry.name.as_deref(), entry.address.as_deref(), &entry.id);
             ui.row(&label, None, (i + 1) as i32, self.selected == i + 1);
         }
@@ -253,5 +275,43 @@ mod tests {
         assert_eq!(Home::status_text(&stale, false), "Stopped");
         assert_eq!(home.update(&a(), &stale), HomeAction::Toggle);
         assert_eq!(home.a_hint(false), "Start");
+    }
+
+    #[test]
+    fn visible_row_count_caps_at_main_row_count() {
+        let cap = crate::ui::MAIN_ROW_COUNT as usize;
+        let plenty: Vec<PendingEntry> =
+            (0..cap).map(|i| PendingEntry { id: format!("id{i}"), name: None, address: None }).collect();
+        let over_cap = CastState { casting: false, client: None, pending: plenty };
+        assert_eq!(visible_row_count(&over_cap), cap, "service row + cap - 1 pending rows, not more");
+
+        let one = CastState {
+            casting: false,
+            client: None,
+            pending: vec![PendingEntry { id: "AA".into(), name: None, address: None }],
+        };
+        assert_eq!(visible_row_count(&one), 2, "well under the cap: service row + the one pending row");
+    }
+
+    #[test]
+    fn selection_and_pairing_never_cross_the_visible_row_cap() {
+        // More pending clients than MAIN_ROW_COUNT can show. Without a cap,
+        // repeated `down` would walk the cursor onto a row draw() never
+        // actually draws (past the hint bar, off the bottom of the panel),
+        // and `A` there would pair a client whose row was never visible.
+        let cap = crate::ui::MAIN_ROW_COUNT as usize - 1; // pending rows that fit
+        let pending: Vec<PendingEntry> =
+            (0..cap + 3).map(|i| PendingEntry { id: format!("id{i}"), name: None, address: None }).collect();
+        let state = CastState { casting: false, client: None, pending };
+        let mut home = Home::new();
+
+        for _ in 0..cap + 5 {
+            home.update(&down(), &state);
+        }
+
+        // The cursor stops at the last row that is actually drawn: the
+        // service row plus `cap` pending rows, so the last pending row is
+        // index `cap - 1`, not one of the clients past the cap.
+        assert_eq!(home.update(&a(), &state), HomeAction::Pair(format!("id{}", cap - 1)));
     }
 }
