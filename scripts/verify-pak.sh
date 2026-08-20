@@ -20,10 +20,26 @@ HOOKS=/mnt/SDCARD/.userdata/h700/.hooks
 
 [ -d "$PAKDIR" ] || { echo "build first: make pak" >&2; exit 1; }
 
-if ! ssh "$DEVICE" "[ -d $DEST ]"; then
-    echo "FAIL: no install found at $DEST on $DEVICE" >&2
-    exit 1
-fi
+# Distinguish "cannot reach the device" from "reached it, nothing installed".
+# `ssh` exits 255 when it could not connect; anything else is the remote
+# command's own status. Reporting an unreachable handheld as a missing
+# install sends you debugging the wrong machine -- which it has already
+# done once, when the device slept mid-verify.
+# `|| rc=$?` because `set -e` would otherwise abort on the failing ssh
+# before the case below could tell the two failures apart.
+rc=0
+ssh "$DEVICE" "[ -d $DEST ]" 2>/dev/null || rc=$?
+case $rc in
+    0) ;;
+    255)
+        echo "FAIL: cannot reach $DEVICE (asleep, off the network, or wrong host?)" >&2
+        exit 1
+        ;;
+    *)
+        echo "FAIL: reached $DEVICE, but no install found at $DEST" >&2
+        exit 1
+        ;;
+esac
 
 MANIFEST=$(mktemp)
 HOOKS_MANIFEST=$(mktemp)
