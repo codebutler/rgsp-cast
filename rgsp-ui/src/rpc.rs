@@ -66,6 +66,13 @@ const SUBMIT_PIN_TIMEOUT: Duration = Duration::from_secs(5);
 const NOT_READY_CODE: i32 = -32000;
 const REJECTED_CODE: i32 = -32001;
 
+/// A [`Control::start_submit_pin`] request, still wrapped in the two
+/// failure layers a real network call can hit: jsonrpsee's own client-level
+/// error, and this crate's own [`SUBMIT_PIN_TIMEOUT`] (applied inside the
+/// spawned task so it fires even on a frame where nothing ever polls the
+/// handle).
+type SubmitPinAttempt = Result<Result<PinResult, jsonrpsee::core::client::Error>, tokio::time::error::Elapsed>;
+
 /// The daemon's answer to `submit_pin`, once it has actually answered (as
 /// opposed to a transport failure, which is a plain `Err`). See the module
 /// constants above for the wire codes this distinguishes.
@@ -93,9 +100,20 @@ pub enum PinOutcome {
 /// `Control` to try again; this one will not heal itself.
 pub struct Control {
     runtime: tokio::runtime::Runtime,
-    client: jsonrpsee::async_client::Client,
+    // `Arc`, not a bare `Client`: `jsonrpsee::async_client::Client` doesn't
+    // implement `Clone` (it wraps a channel to a background task, not
+    // something meant to be duplicated), but `start_submit_pin` needs a
+    // `'static` owned handle to move into a spawned task while `self` keeps
+    // using the client for everything else. An `Arc` clone is the standard
+    // way to share one jsonrpsee client across concurrent callers.
+    client: std::sync::Arc<jsonrpsee::async_client::Client>,
     sub: Subscription<CastState>,
     connected: bool,
+    /// The in-flight request from [`Control::start_submit_pin`], if any.
+    /// `None` both before one is ever started and after
+    /// [`Control::poll_submit_pin`]/[`Control::cancel_submit_pin`] has
+    /// consumed it.
+    pending_pin: Option<tokio::task::JoinHandle<SubmitPinAttempt>>,
 }
 
 impl Control {
@@ -121,7 +139,7 @@ impl Control {
             anyhow::Ok((client, sub))
         })?;
 
-        Ok(Self { runtime, client, sub, connected: true })
+        Ok(Self { runtime, client: std::sync::Arc::new(client), sub, connected: true, pending_pin: None })
     }
 
     /// True once `connect` succeeded and no subsequent call has observed the
@@ -152,31 +170,93 @@ impl Control {
         })
     }
 
-    /// Submits a pairing PIN. Returns a [`PinOutcome`] once the daemon has
-    /// answered — success, not-ready-yet, or rejected are all legitimate,
-    /// expected responses, not crashes, and none of them mark the
-    /// connection dead. Only a transport-level failure (dropped connection,
-    /// timeout) does that, and surfaces as `Err`.
-    pub fn submit_pin(&mut self, id: &str, pin: &str) -> anyhow::Result<PinOutcome> {
+    /// Begins submitting a pairing PIN, without blocking the frame loop.
+    /// [`Control::poll_submit_pin`] reports the result on a later frame —
+    /// same split as [`Control::connect`]/[`Control::poll_state`]: the
+    /// daemon can take up to a few seconds to answer (its own
+    /// `PAIRING_TIMEOUT`), and the frame loop must keep polling input and
+    /// redrawing while that's in flight, or a "Cancel" button drawn on
+    /// screen would be a lie — pressing it would do nothing until the
+    /// blocked call already returned on its own.
+    ///
+    /// A second call before the first resolves silently replaces it: the
+    /// abandoned `JoinHandle` is dropped, which detaches rather than aborts
+    /// the spawned task (tokio's default) — the earlier request keeps
+    /// running to completion on the daemon side, its result just becomes
+    /// unobservable. Nothing in this crate calls it that way today (the
+    /// screen that could only reaches a fresh submit after the previous one
+    /// has resolved or been cancelled), but it is not unsound either way.
+    pub fn start_submit_pin(&mut self, id: &str, pin: &str) {
+        let client = self.client.clone();
         let mut params = ObjectParams::new();
-        params.insert("id", id).context("encoding id")?;
-        params.insert("pin", pin).context("encoding pin")?;
+        // &str values always encode; the only way `ObjectParams::insert`
+        // fails is a serialization error, which cannot happen for these.
+        params.insert("id", id).expect("id is a plain string");
+        params.insert("pin", pin).expect("pin is a plain string");
 
-        let outcome = self.runtime.block_on(async {
-            tokio::time::timeout(SUBMIT_PIN_TIMEOUT, self.client.request::<PinResult, _>("submit_pin", params))
-                .await
-        });
+        self.pending_pin = Some(self.runtime.spawn(async move {
+            tokio::time::timeout(SUBMIT_PIN_TIMEOUT, client.request::<PinResult, _>("submit_pin", params)).await
+        }));
+    }
 
-        match outcome {
-            Ok(Ok(PinResult { paired: true })) => Ok(PinOutcome::Paired),
-            Ok(Ok(PinResult { paired: false })) => {
+    /// Non-blocking: `None` while the request from
+    /// [`Control::start_submit_pin`] is still in flight (or if none was
+    /// ever started), `Some` once it resolves — success, not-ready-yet, and
+    /// rejected are all legitimate, expected responses, not crashes, and
+    /// none of them mark the connection dead. Only a transport-level
+    /// failure (dropped connection, timeout, a panicked request task) does
+    /// that, and surfaces as `Err`. Same zero-timeout-poll precedent as
+    /// [`Control::poll_state`].
+    pub fn poll_submit_pin(&mut self) -> Option<anyhow::Result<PinOutcome>> {
+        let handle = self.pending_pin.as_mut()?;
+        let Ok(join_result) = self.runtime.block_on(async { tokio::time::timeout(Duration::ZERO, handle).await })
+        else {
+            return None; // still pending this frame
+        };
+        self.pending_pin = None;
+        Some(self.interpret_submit_pin(join_result))
+    }
+
+    /// Stop waiting on an in-flight [`Control::start_submit_pin`] request,
+    /// without aborting it. The daemon may still complete the pairing after
+    /// this — dropping the `JoinHandle` only detaches it (tokio's default),
+    /// it does not cancel the spawned task. The home screen's pending list
+    /// is what tells the truth about what actually happened; this just
+    /// stops the frame loop waiting for an answer it no longer needs.
+    pub fn cancel_submit_pin(&mut self) {
+        self.pending_pin = None;
+    }
+
+    /// Shared by [`Control::poll_submit_pin`]'s only caller: unwraps the
+    /// three failure layers a resolved request can carry (task join,
+    /// timeout, RPC error) into a [`PinOutcome`] or a plain error, and
+    /// applies the same "which failures mark the connection dead" rules
+    /// the old blocking `submit_pin` used.
+    fn interpret_submit_pin(
+        &mut self,
+        join_result: Result<SubmitPinAttempt, tokio::task::JoinError>,
+    ) -> anyhow::Result<PinOutcome> {
+        match join_result {
+            Err(join_err) => {
+                // The spawned task panicked -- not a wire-level answer at
+                // all. Something is wrong with this connection, not just
+                // this one request.
+                self.connected = false;
+                Err(anyhow::anyhow!("submit_pin task did not complete: {join_err}"))
+            }
+            Ok(Err(_elapsed)) => {
+                self.connected = false;
+                Err(anyhow::anyhow!("submit_pin timed out after {SUBMIT_PIN_TIMEOUT:?}"))
+            }
+            Ok(Ok(Ok(PinResult { paired: true }))) => Ok(PinOutcome::Paired),
+            Ok(Ok(Ok(PinResult { paired: false }))) => {
                 // The daemon only ever returns `Ok` on success (see
                 // `PinApiServer::submit_pin`) — a false `paired` here would
                 // be a wire-contract surprise, not one of the two documented
                 // failure codes, so it doesn't fit `PinOutcome`.
                 Err(anyhow::anyhow!("submit_pin succeeded but reported paired: false"))
             }
-            Ok(Err(jsonrpsee::core::client::Error::Call(err))) => match err.code() {
+            Ok(Ok(Err(jsonrpsee::core::client::Error::Call(err)))) => match err.code() {
                 NOT_READY_CODE => Ok(PinOutcome::NotReady),
                 REJECTED_CODE => Ok(PinOutcome::Rejected),
                 // An RPC error with a code the client doesn't recognize is
@@ -186,13 +266,9 @@ impl Control {
                 // than being forced into `PinOutcome`.
                 _ => Err(err.into()),
             },
-            Ok(Err(err)) => {
+            Ok(Ok(Err(err))) => {
                 self.connected = false;
                 Err(err.into())
-            }
-            Err(_) => {
-                self.connected = false;
-                Err(anyhow::anyhow!("submit_pin timed out after {SUBMIT_PIN_TIMEOUT:?}"))
             }
         }
     }

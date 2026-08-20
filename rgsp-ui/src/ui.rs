@@ -453,25 +453,19 @@ impl Ui {
         rect.h
     }
 
-    /// Draw the PIN screen's error line with NextUI's own `GFX_blitMessage`
-    /// (`api.h:400`) — the primitive NextUI itself uses for exactly this: a
-    /// short status message centred in a reserved region, e.g.
-    /// `ledcontrol.c:262-283`'s `GFX_blitMessage(font.large, "This device
-    /// has no RGB lights.", screen, &(SDL_Rect){0, 0, screen->w,
-    /// screen->h})`. It centres both horizontally and vertically within the
-    /// rect it's given ([`pin_error_band`] computes ours) and *wraps*
-    /// text too wide for it rather than truncating — unlike `row()`'s or
-    /// `header()`'s truncation, this relies on the caller only ever passing
-    /// short, app-authored text. That is true here: PIN rejection messages
-    /// (`"PIN rejected"`, `"Not ready yet, try again"`, `"Connection
-    /// lost"`, `"Not connected"`) are fixed constants in `pin.rs`, never a
-    /// caller-supplied string like a device name or address — the same
-    /// distinction that ruled `GFX_blitText`/`GFX_sizeText` out for
-    /// `header()`/`row()`'s unbounded labels but does not apply to this
-    /// call site.
-    pub fn pin_error(&mut self, text: &str) {
-        let (y, h) = pin_error_band(self.h, self.underline_height());
-        let mut rect = SDL_Rect { x: 0, y, w: self.w, h };
+    /// Draw `text` with NextUI's own `GFX_blitMessage` (`api.h:400`) into
+    /// `rect` — the primitive NextUI itself uses for a short status message
+    /// centred in a reserved region, e.g. `ledcontrol.c:262-283`'s
+    /// `GFX_blitMessage(font.large, "This device has no RGB lights.",
+    /// screen, &(SDL_Rect){0, 0, screen->w, screen->h})`. It centres both
+    /// horizontally and vertically within `rect` and *wraps* text too wide
+    /// for it rather than truncating — unlike `row()`'s or `header()`'s
+    /// truncation, this relies on the caller only ever passing short,
+    /// app-authored text, never something caller-supplied like a device
+    /// name or address (the same distinction that ruled
+    /// `GFX_blitText`/`GFX_sizeText` out for `header()`/`row()`'s unbounded
+    /// labels but does not apply to either of this method's callers).
+    fn blit_message(&mut self, text: &str, mut rect: SDL_Rect) {
         let Ok(cstr) = CString::new(text) else {
             return; // embedded NUL; nothing sane to draw
         };
@@ -484,6 +478,28 @@ impl Ui {
         unsafe {
             sys::GFX_blitMessage(sys::font.large, cstr.as_ptr().cast_mut(), self.screen, &mut rect);
         }
+    }
+
+    /// Draw the PIN screen's error line: [`pin_error_band`]'s region,
+    /// between the cursor underline and the reserved bottom hint-bar band.
+    /// Kept inline (as opposed to [`Ui::full_screen_message`]) for the one
+    /// PIN outcome that stays on this screen — `NotReady`, where the same
+    /// PIN will work again shortly and the user's typed digits are still
+    /// worth keeping on screen. The other outcomes (`Rejected`, a dropped
+    /// connection) end the attempt and use the full-screen state instead.
+    pub fn pin_error(&mut self, text: &str) {
+        let (y, h) = pin_error_band(self.h, self.underline_height());
+        self.blit_message(text, SDL_Rect { x: 0, y, w: self.w, h });
+    }
+
+    /// Draw `text` as NextUI's own full-screen message state
+    /// (`ledcontrol.c:262-283`): centred in the whole panel, with no
+    /// header and no hardware-status chrome — the message *is* the screen.
+    /// Pair with [`Ui::hints`] for whatever single button the caller
+    /// offers (`B Back` or `B Cancel`), matching `ledcontrol.c`'s own
+    /// `GFX_blitButtonGroup` call immediately after its `GFX_blitMessage`.
+    pub fn full_screen_message(&mut self, text: &str) {
+        self.blit_message(text, SDL_Rect { x: 0, y: 0, w: self.w, h: self.h });
     }
 
     /// Draw the button-hint bar, e.g. `[("A", "OK"), ("B", "BACK")]`.

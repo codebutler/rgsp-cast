@@ -90,12 +90,15 @@ impl Pin {
         self.cursor
     }
 
-    /// Records a message to show under the digit row, e.g. after
-    /// `Control::submit_pin` reports [`crate::rpc::PinOutcome::Rejected`] or
-    /// [`crate::rpc::PinOutcome::NotReady`]. Cleared automatically the next
-    /// time the user edits a digit or the cursor (see [`Pin::update`]), so a
-    /// stale rejection message doesn't linger over a PIN the user has since
-    /// changed.
+    /// Records a message to show under the digit row. `main.rs` calls this
+    /// only for [`crate::rpc::PinOutcome::NotReady`] — the daemon isn't
+    /// ready to pair yet, but the same PIN will work shortly, so this stays
+    /// on the PIN screen rather than ending the attempt. `Rejected` and a
+    /// dropped connection are terminal outcomes instead:
+    /// `crate::screens::message::Message`'s full-screen state, not this.
+    /// Cleared automatically the next time the user edits a digit or the
+    /// cursor (see [`Pin::update`]), so a stale message doesn't linger over
+    /// a PIN the user has since changed.
     pub fn set_error(&mut self, msg: &str) {
         self.error = Some(msg.to_string());
     }
