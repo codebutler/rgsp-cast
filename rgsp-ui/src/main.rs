@@ -211,7 +211,13 @@ fn main() -> anyhow::Result<()> {
                 }
                 PairingAction::None => match control.as_mut().and_then(Control::poll_submit_pin) {
                     None => Screen::Pairing(pin), // still waiting
-                    Some(Ok(PinOutcome::Paired)) => Screen::Home(Home::new()),
+                    // Confirm it worked. Returning straight to Home said
+                    // nothing: the pending row simply vanished, which looks
+                    // identical to the client giving up, and Home lists only
+                    // clients still waiting -- never the ones already paired.
+                    Some(Ok(PinOutcome::Paired)) => {
+                        Screen::Message(Message::new(format!("Paired with {}.", pin.label())))
+                    }
                     // Transient: the daemon is still starting up, not a bad
                     // PIN. The same PIN will work shortly, so return to the
                     // digits already typed rather than a terminal screen.
