@@ -49,11 +49,13 @@ make pak
 ```
 
 Then on the handheld: **Tools → Cast**. It toggles — once to start, again to
-stop. The screen shows the pairing address while idle and the client name while
-connected.
+stop — and shows whether the service is running.
 
-To pair, add the handheld's IP in Moonlight, then enter the PIN it shows at
-`http://DEVICE:47989/pin` from any browser on the network. Pairing persists.
+To pair, add the handheld's IP in Moonlight. The client shows up by itself in
+the Cast list, labelled by hostname where the network resolves one, otherwise
+by IP. Select it and type the 4-digit PIN Moonlight is showing, using the
+D-pad: left/right moves between digits, up/down changes the selected one, A
+submits, B goes back. Pairing persists.
 
 Recording to a file instead, no client involved:
 
@@ -239,13 +241,14 @@ Use `moonlight-qt` on a desktop, which logs the client's own reasoning:
 
 ```sh
 /Applications/Moonlight.app/Contents/MacOS/Moonlight pair 192.168.180.106 --pin 1234
-ssh root@DEVICE 'wget -qO- --post-data="uniqueid=0123456789ABCDEF&pin=1234" \
-  --header="Content-Type: application/x-www-form-urlencoded" \
-  "http://127.0.0.1:47989/submit-pin"'
 
 /Applications/Moonlight.app/Contents/MacOS/Moonlight stream 192.168.180.106 "RG SP" \
   --720 --fps 60 --bitrate 5000 --display-mode windowed --video-decoder hardware
 ```
+
+The PIN itself has to go in on the handheld now — **Tools → Cast**, select the
+pending client, enter the PIN with the D-pad. There is no headless way to
+answer a pairing request; someone has to be at the device.
 
 Its log lands in `/tmp/Moonlight-*.log`. `Waiting for IDR frame`, `Reached
 consecutive drop limit` and `Received first audio/video packet` are the lines
@@ -351,7 +354,9 @@ Vendored workspace scaffolding removed so the repo root owns the workspace:
 `pub(crate)`. `moonshine-core/tests/protocol_surface.rs` guards these — it fails
 to compile if a subtree pull reverts them.
 
-- Pairing logs the PIN URL instead of raising a desktop notification.
+- Pairing has no desktop notification and no browser PIN page; pending clients
+  are listed and answered from the on-device UI instead
+  (`rgsp-host/src/control.rs`).
 - `/appasset` serves the configured boxart verbatim rather than rescaling it to
   600x801 (which needed the `image` crate).
 - `HdrMetadata` / `HdrModeState` moved from the deleted `compositor/frame.rs`
