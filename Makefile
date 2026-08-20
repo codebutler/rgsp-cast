@@ -105,6 +105,11 @@ pak: bin/snd-aloop.ko
 	cp pak/launch.sh pak/pak.json $(PAKDIR)/
 	cp bin/snd-aloop.ko $(PAKDIR)/
 	cp -r pak/hooks $(PAKDIR)/
+	@# macOS drops .DS_Store into any directory Finder has looked at, and
+	@# `cp -r` carries them into the pak and then onto the device. They are
+	@# junk on a handheld, and they make verify-pak.sh's manifest disagree
+	@# with what install-pak.sh actually copies.
+	find $(PAKDIR) -name '.DS_Store' -delete
 	chmod +x $(PAKDIR)/launch.sh $(PAKDIR)/rgsp-host $(PAKDIR)/rgsp-ui $(PAKDIR)/hooks/*/*.sh
 	@echo "-> $(PAKDIR)"
 	@echo "   lib/h700 is populated on the device at install time"
