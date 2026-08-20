@@ -42,6 +42,11 @@ impl Home {
     /// against a remembered row count would let `A` act on a row that no
     /// longer exists. Clamping against the row count `state` reports *right
     /// now* is what makes that impossible.
+    ///
+    /// `A` on the service row always returns `Toggle` — which direction
+    /// that means (start vs. stop) is decided by the caller from socket
+    /// connectivity, not here; see [`Home::a_hint`] and [`Home::status_text`]
+    /// for where connectivity actually changes what's shown.
     pub fn update(&mut self, buttons: &Buttons, state: &CastState) -> HomeAction {
         let row_count = 1 + state.pending.len();
         if self.selected >= row_count {
@@ -70,31 +75,54 @@ impl Home {
 
     /// What the `A` button's hint label should read for the current
     /// selection: `Pair` on a pending row (that's what `A` does there),
-    /// `Start`/`Stop` on the service row, mirroring `casting`. Pure — no
-    /// `Ui` — so this stays unit-testable alongside `update`, the same
-    /// FFI-free split. The hint bar is the only affordance this device has
-    /// for what a button does, so it must always name the action `A` is
-    /// actually about to take, not just what it would do on a different row.
-    fn a_hint(&self, state: &CastState) -> &'static str {
+    /// `Start`/`Stop` on the service row, mirroring `connected` -- the
+    /// daemon's liveness, not `casting`. Pure — no `Ui` — so this stays
+    /// unit-testable alongside `update`, the same FFI-free split. The hint
+    /// bar is the only affordance this device has for what a button does,
+    /// so it must always name the action `A` is actually about to take, not
+    /// just what it would do on a different row.
+    fn a_hint(&self, connected: bool) -> &'static str {
         if self.selected == 0 {
-            if state.casting { "Stop" } else { "Start" }
+            if connected { "Stop" } else { "Start" }
         } else {
             "Pair"
         }
     }
 
-    pub fn draw(&self, ui: &mut Ui, state: &CastState) {
+    /// The service row's text: three honest states, not two. The socket
+    /// being down means the daemon isn't running at all (`Stopped`); the
+    /// socket being up but no stream in progress means it's running idle
+    /// (`Running`); and `casting` on top of that means a client is actively
+    /// streaming (`Casting`, with the client's name if `state.client` has
+    /// one). Collapsing this to just `casting` (the old behavior) read
+    /// "Stopped" for a daemon that was up and simply idle, which is the
+    /// normal state right after starting it. Pure, and split out of `draw`
+    /// so it stays unit-testable without a `Ui`, same as `a_hint`.
+    fn status_text(state: &CastState, connected: bool) -> String {
+        if !connected {
+            "Stopped".to_string()
+        } else if state.casting {
+            match state.client.as_deref() {
+                Some(name) => format!("Casting ({name})"),
+                None => "Casting".to_string(),
+            }
+        } else {
+            "Running".to_string()
+        }
+    }
+
+    pub fn draw(&self, ui: &mut Ui, state: &CastState, connected: bool) {
         ui.header("Cast");
 
-        let status = if state.casting { "Running" } else { "Stopped" };
-        ui.row("Service", Some(status), 0, self.selected == 0);
+        let status = Self::status_text(state, connected);
+        ui.row("Service", Some(&status), 0, self.selected == 0);
 
         for (i, entry) in state.pending.iter().enumerate() {
             let label = crate::screens::client_label(entry.name.as_deref(), &entry.id);
             ui.row(&label, Some(">"), (i + 1) as i32, self.selected == i + 1);
         }
 
-        ui.hints(&[("A", self.a_hint(state)), ("B", "Exit")]);
+        ui.hints(&[("A", self.a_hint(connected)), ("B", "Exit")]);
     }
 }
 
@@ -170,23 +198,21 @@ mod tests {
     }
 
     #[test]
-    fn a_hint_tracks_the_selection() {
+    fn a_hint_tracks_the_selection_and_connectivity() {
         let state = CastState {
             casting: true,
             client: None,
             pending: vec![PendingEntry { id: "AA".into(), name: None }],
         };
         let mut home = Home::new();
-        // service row selected: hint mirrors `casting`, not "Pair"
-        assert_eq!(home.a_hint(&state), "Stop");
+        // service row selected, connected: A stops the daemon
+        assert_eq!(home.a_hint(true), "Stop");
+        // service row selected, disconnected: A starts it, regardless of `casting`
+        assert_eq!(home.a_hint(false), "Start");
 
         home.update(&down(), &state);
         // pending row selected: A pairs here, not toggles the service
-        assert_eq!(home.a_hint(&state), "Pair");
-
-        let stopped = CastState { casting: false, ..state };
-        let home = Home::new();
-        assert_eq!(home.a_hint(&stopped), "Start");
+        assert_eq!(home.a_hint(true), "Pair");
     }
 
     #[test]
@@ -194,5 +220,37 @@ mod tests {
         let state = CastState { casting: false, client: None, pending: vec![] };
         let mut home = Home::new();
         assert_eq!(home.update(&b(), &state), HomeAction::Exit);
+    }
+
+    #[test]
+    fn connected_and_not_casting_reads_running_and_offers_stop() {
+        let state = CastState { casting: false, client: None, pending: vec![] };
+        let mut home = Home::new();
+        assert_eq!(Home::status_text(&state, true), "Running");
+        assert_eq!(home.update(&a(), &state), HomeAction::Toggle);
+        assert_eq!(home.a_hint(true), "Stop");
+    }
+
+    #[test]
+    fn connected_and_casting_reads_casting_with_the_client_name() {
+        // `casting` on top of a live socket is a third state ("Casting"),
+        // not the same row text as an idle-but-connected daemon.
+        let anonymous = CastState { casting: true, client: None, pending: vec![] };
+        let named = CastState { casting: true, client: Some("eric-mbp".into()), pending: vec![] };
+        assert_eq!(Home::status_text(&anonymous, true), "Casting");
+        assert_eq!(Home::status_text(&named, true), "Casting (eric-mbp)");
+    }
+
+    #[test]
+    fn disconnected_reads_stopped_and_offers_start_regardless_of_stale_casting_state() {
+        // The socket being down authoritatively means "stopped", even if
+        // the last state we polled before losing the connection said
+        // `casting: true` -- a stale flag from before disconnect must not
+        // override the liveness signal.
+        let stale = CastState { casting: true, client: Some("eric-mbp".into()), pending: vec![] };
+        let mut home = Home::new();
+        assert_eq!(Home::status_text(&stale, false), "Stopped");
+        assert_eq!(home.update(&a(), &stale), HomeAction::Toggle);
+        assert_eq!(home.a_hint(false), "Start");
     }
 }

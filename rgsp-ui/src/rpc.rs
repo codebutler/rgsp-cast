@@ -24,6 +24,15 @@ pub struct PendingEntry {
 /// Mirrors `rgsp_host::control::CastState`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CastState {
+    /// A Moonlight client is **actively streaming** right now — not "the
+    /// daemon is running". `rgsp-host` sets this when a session starts and
+    /// clears it when the session ends, so it is false for a healthy idle
+    /// daemon. Liveness is a separate question, answered by whether the
+    /// control socket connects at all ([`Control::is_connected`]).
+    ///
+    /// Conflating the two shipped a bug: the home screen showed "Stopped"
+    /// for a running-but-idle daemon, so the service could never be stopped
+    /// from the UI and every press spawned a doomed second daemon.
     pub casting: bool,
     pub client: Option<String>,
     pub pending: Vec<PendingEntry>,

@@ -121,7 +121,7 @@ fn main() -> anyhow::Result<()> {
             Screen::Home(home) => match home.update(&buttons, &state) {
                 HomeAction::None => {}
                 HomeAction::Toggle => {
-                    let starting = !state.casting;
+                    let starting = !connected;
                     let message = if starting { "Starting..." } else { "Stopping..." };
                     // `service.start()`/`stop()` below block the frame loop
                     // for up to 5s/15s (their documented timeouts) with no
@@ -143,6 +143,14 @@ fn main() -> anyhow::Result<()> {
                     if let Err(e) = result {
                         tracing::error!("service toggle failed: {e:#}");
                     }
+                    // Force an immediate reconnect attempt next frame instead
+                    // of waiting out `RECONNECT_INTERVAL`. Without this, a
+                    // successful start can still read as "Stopped" for up to
+                    // that long, because `connected` won't flip true until
+                    // the throttle lets a new `Control::connect` through --
+                    // the same "flashes then goes back to Stopped" symptom
+                    // this whole change exists to fix, just shrunk.
+                    last_reconnect_attempt = None;
                 }
                 HomeAction::Pair(id) => {
                     let name = state.pending.iter().find(|p| p.id == id).and_then(|p| p.name.clone());
@@ -191,7 +199,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         match &screen {
-            Screen::Home(home) => home.draw(&mut ui, &state),
+            Screen::Home(home) => home.draw(&mut ui, &state, connected),
             Screen::Pin(pin) => pin.draw(&mut ui),
         }
         ui.end();
