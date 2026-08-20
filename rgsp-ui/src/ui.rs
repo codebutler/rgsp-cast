@@ -198,6 +198,17 @@ impl Ui {
         self.blit_text(title, pad, pad, COLOR_WHITE);
     }
 
+    /// The font's line height, in pixels. Used to centre text against a
+    /// fixed band: it is constant per font, unlike a rendered surface's
+    /// height, so every row's baseline lines up whether or not a particular
+    /// string happens to contain descenders.
+    fn text_height(&self) -> i32 {
+        // SAFETY: font.large is populated by GFX_init before any Ui exists.
+        // TTF_FontHeight reads the font's metrics; it does not touch any
+        // rendered surface.
+        unsafe { sys::TTF_FontHeight(sys::font.large) }
+    }
+
     /// Draw one menu row: a label, an optional right-aligned value, at
     /// vertical slot `index`, highlighted if `selected`.
     pub fn row(&mut self, label: &str, value: Option<&str>, index: i32, selected: bool) {
@@ -215,7 +226,7 @@ impl Ui {
         }
 
         let color = if selected { COLOR_BLACK } else { COLOR_WHITE };
-        let text_y = y + (pill_h - sys::scale1(PADDING * 2)) / 2;
+        let text_y = y + (pill_h - self.text_height()) / 2;
         self.blit_text(label, pad * 2, text_y, color);
 
         if let Some(value) = value {
@@ -254,7 +265,7 @@ impl Ui {
                 let color = if is_cursor { COLOR_BLACK } else { COLOR_WHITE };
                 let width = self.text_width(&text);
                 let tx = x + (box_size - width) / 2;
-                let ty = y + sys::scale1(PADDING);
+                let ty = y + (box_size - self.text_height()) / 2;
                 self.blit_text(&text, tx, ty, color);
             }
         }

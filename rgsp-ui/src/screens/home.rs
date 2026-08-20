@@ -119,7 +119,7 @@ impl Home {
 
         for (i, entry) in state.pending.iter().enumerate() {
             let label = crate::screens::client_label(entry.name.as_deref(), entry.address.as_deref(), &entry.id);
-            ui.row(&label, Some(">"), (i + 1) as i32, self.selected == i + 1);
+            ui.row(&label, None, (i + 1) as i32, self.selected == i + 1);
         }
 
         ui.hints(&[("A", self.a_hint(connected)), ("B", "Exit")]);
