@@ -47,9 +47,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Starts and stops the `rgsp-host` daemon for a pak installed at `pak_dir`,
 /// coordinating through `run_dir` (pidfile, control socket, log).
 ///
-/// `run_dir` must agree with wherever the daemon actually puts those files —
-/// on the device that's the daemon's hardcoded `/tmp/rgsp` — so this is a
-/// parameter for testability, not a knob that changes daemon behavior.
+/// `run_dir` must agree with wherever the daemon actually puts those files.
+/// Nothing in this struct enforces that -- what keeps the two sides in sync
+/// is that both read the same environment variable with the same fallback:
+/// this crate's `main.rs::run_dir()` and `rgsp-host/src/main.rs::run_dir()`
+/// both resolve `RGSP_RUN_DIR`, falling back to `/tmp/rgsp` if it is unset.
+/// Production callers should go through that shared resolution (as
+/// `main.rs` does) rather than pass an independently-computed path; tests
+/// are the deliberate exception, using their own isolated `run_dir` on both
+/// the real and stub `rgsp-host` sides so they never touch `/tmp/rgsp`.
 pub struct Service {
     pak_dir: PathBuf,
     run_dir: PathBuf,

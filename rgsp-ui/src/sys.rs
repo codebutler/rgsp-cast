@@ -1,12 +1,35 @@
 //! Raw NextUI bindings, plus the macros bindgen cannot carry.
-#![allow(
-    non_upper_case_globals,
-    non_camel_case_types,
-    non_snake_case,
-    dead_code
-)]
+//!
+//! # The `platform.h` trap
+//!
+//! Three h700 constants look bindable from `vendor/nextui/h700/platform.h`
+//! and are not: that header redefines each of them as a runtime ternary
+//! rather than a plain constant, so bindgen silently emits nothing for them
+//! (no error, no warning -- they are just absent from the generated
+//! bindings). Each was found the hard way, separately, during this project:
+//!
+//! - `FIXED_WIDTH`/`FIXED_HEIGHT` -- `hdmi_active?...:is_cube?...`
+//! - `PADDING` -- `(hdmi_active||is_cube)?5:10`
+//! - `MAIN_ROW_COUNT` -- `(hdmi_active||is_cube)?10:6`
+//!
+//! `PADDING` and `MAIN_ROW_COUNT` are hand-carried as plain Rust constants
+//! in `ui.rs` instead, each justified by a proof comment there that this
+//! device's fixed 720x480 surface always takes the same branch of the
+//! ternary (search `ui.rs` for `PADDING` and `MAIN_ROW_COUNT`). No
+//! `FIXED_WIDTH`/`FIXED_HEIGHT` equivalent exists yet -- if something needs
+//! them, they need the same treatment, not a bindgen allowlist entry.
+#![allow(non_upper_case_globals, non_camel_case_types, non_snake_case)]
 
-include!(concat!(env!("OUT_DIR"), "/nextui.rs"));
+// `dead_code` scoped to just this generated module rather than the whole
+// file: bindgen's output allowlists whole families of functions/constants
+// (see `build.rs`) and not everything in a family is used yet, but the
+// blanket file-level `allow` this used to be would also hide genuinely
+// dead hand-written code below (`scale1`..`scale4`).
+mod generated {
+    #![allow(dead_code)]
+    include!(concat!(env!("OUT_DIR"), "/nextui.rs"));
+}
+pub use generated::*;
 
 // FIXED_SCALE is a compile-time 2 on h700 and a runtime ternary on tg5040.
 // The scale helpers below are only correct for the former, so refuse to
