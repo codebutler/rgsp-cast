@@ -1,5 +1,10 @@
 # rgsp-cast
 
+<p>
+<img src="docs/cast-list.png" alt="Cast list, showing the service running and one client" width="49%">
+<img src="docs/pair-pin.png" alt="PIN entry for pairing a client" width="49%">
+</p>
+
 Stream the screen and sound of an **Anbernic RG SP** (Allwinner H700 /
 sun50iw9, **BaseOS + NextUI**) to any Moonlight client — an Apple TV, a phone,
 a desktop — and play it from there.
