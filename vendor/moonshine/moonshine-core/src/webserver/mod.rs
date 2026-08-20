@@ -36,6 +36,7 @@ use self::pairing::handle_pair_request;
 use super::session::stream::audio::AudioChannels;
 
 mod pairing;
+mod reverse_dns;
 
 /// Configuration for the embedded webserver.
 #[derive(Clone, Debug, Serialize, Deserialize)]

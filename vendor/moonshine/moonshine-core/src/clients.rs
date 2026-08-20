@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -31,13 +30,15 @@ pub(crate) struct PendingClient {
 	/// Human-readable name Moonlight sent as `devicename`, when it sent one.
 	pub(crate) name: Option<String>,
 
-	/// IP address of the peer that opened this pairing connection. Every
-	/// Moonlight client hardcodes both `devicename` and, absent
-	/// `m_UseTrueUid`, `uniqueid` too, so on a home LAN this is often the
-	/// only thing that actually distinguishes one pairing client from
-	/// another. The port is deliberately not kept: it is ephemeral per
-	/// connection and would just be noise in the on-device UI.
-	pub(crate) address: Option<IpAddr>,
+	/// Display label for the peer that opened this pairing connection: a
+	/// reverse-DNS hostname when one resolved, otherwise the bare IP as a
+	/// string (see `webserver::reverse_dns::resolve_label`, which computes
+	/// this once at registration time). Every Moonlight client hardcodes
+	/// both `devicename` and, absent `m_UseTrueUid`, `uniqueid` too, so on a
+	/// home LAN this is often the only thing that actually distinguishes one
+	/// pairing client from another. The port is deliberately not kept: it is
+	/// ephemeral per connection and would just be noise in the on-device UI.
+	pub(crate) address: Option<String>,
 
 	/// Client certificate used for secure communication (PEM format).
 	pub(crate) pem: String,
@@ -86,8 +87,9 @@ pub struct PendingInfo {
 	pub id: String,
 	pub name: Option<String>,
 
-	/// IP address of the peer that opened this pairing connection, formatted
-	/// as a plain string (no port). `None` if the peer address could not be
+	/// Display label for the peer that opened this pairing connection: a
+	/// reverse-DNS hostname when one resolved, otherwise the bare IP as a
+	/// string (no port). `None` if the peer address could not be
 	/// determined.
 	pub address: Option<String>,
 }
@@ -140,7 +142,7 @@ impl ClientManager {
 			.map(|c| PendingInfo {
 				id: c.id.clone(),
 				name: c.name.clone(),
-				address: c.address.map(|addr| addr.to_string()),
+				address: c.address.clone(),
 			})
 			.collect()
 	}
@@ -177,13 +179,17 @@ impl ClientManager {
 
 	/// Insert a pending client, signal the change, and return the `Notify`
 	/// that fires once a PIN has been received for it.
+	///
+	/// `address` is the already-resolved display label (see
+	/// [`PendingClient::address`]), not a raw IP - resolving it is an async,
+	/// blocking-pool operation, so callers do that before calling in here.
 	pub(crate) fn add_pending(
 		&self,
 		id: String,
 		pem: String,
 		salt: [u8; 16],
 		name: Option<String>,
-		address: Option<IpAddr>,
+		address: Option<String>,
 	) -> Arc<Notify> {
 		let pin_notify = Arc::new(Notify::new());
 		if let Ok(mut inner) = self.pending_clients.write() {
@@ -570,10 +576,14 @@ mod pending_tests {
 	}
 
 	#[test]
-	fn pending_clients_lists_the_peer_address_as_a_plain_string() {
+	fn pending_clients_lists_the_address_label_it_was_given() {
+		// `add_pending` takes an already-resolved label (see
+		// `webserver::reverse_dns::resolve_label`), which is either a
+		// reverse-DNS hostname or, absent one, the bare IP as a string. This
+		// just checks `ClientManager` passes whatever it's given straight
+		// through - resolution itself is tested in `reverse_dns`.
 		let m = manager();
-		let addr: IpAddr = "192.168.180.44".parse().unwrap();
-		m.add_pending("1122".into(), "pem".into(), salt(), None, Some(addr));
+		m.add_pending("1122".into(), "pem".into(), salt(), None, Some("192.168.180.44".into()));
 		assert_eq!(m.pending_clients()[0].address.as_deref(), Some("192.168.180.44"));
 	}
 

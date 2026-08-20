@@ -14,13 +14,17 @@ edition = "2024"
 #                                 via `toml`. Dropping it also drops
 #                                 libsqlite3-sys, which compiles the SQLite
 #                                 amalgamation with cc on every clean build.
-#   bitflags, byteorder, futures-util, libc, serde_json, tempfile
+#   bitflags, byteorder, futures-util, serde_json, tempfile
 #                                 assorted, all orphaned by the above
 #
 # Verified by `cargo test --workspace` in the arm64 container, not by grep:
 # 299 -> 264 crates in Cargo.lock. If a `git subtree pull` reinstates any of
 # these, that is a regression to undo, not an upstream improvement to keep -
 # unless it also restores the subsystem that needs it.
+#
+# libc was among the above but came back deliberately: `webserver::
+# reverse_dns` calls `getnameinfo(3)` directly for reverse-DNS pairing
+# labels, and that's a real, current use - not a reinstated leftover.
 [dependencies]
 aes = "0.9.1"
 aes-gcm = "0.10.3"
@@ -37,6 +41,7 @@ http-body-util = "0.1.3"
 hyper = { version = "1.10.1", features = ["server", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 inout = "0.2.2"
+libc = "0.2"
 mdns-sd = "0.20.0"
 network-interface = "2.0.5"
 opus = "0.3.1"

@@ -1480,6 +1480,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "inout 0.2.2",
+ "libc",
  "mdns-sd",
  "network-interface",
  "opus",

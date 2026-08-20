@@ -12,6 +12,7 @@ use crate::ShutdownReason;
 use crate::clients::ClientManager;
 use crate::clients::PendingClientGuard;
 use crate::webserver::bad_request;
+use crate::webserver::reverse_dns;
 
 /// Extract a required query parameter, or return a 400 bad-request response.
 macro_rules! require_param {
@@ -151,11 +152,17 @@ async fn get_server_cert(
 		},
 	};
 
-	// Store only the peer's IP, not the ephemeral port: the port changes per
-	// connection and is noise to a human reading the pairing UI.
+	// Only the peer's IP feeds the label, not the ephemeral port: the port
+	// changes per connection and is noise to a human reading the pairing UI.
 	let peer_ip = peer_address.map(|addr| addr.ip());
 
-	let pin_notifier = client_manager.add_pending(unique_id.clone(), client_pem, salt, device_name, peer_ip);
+	// Resolved once, here, rather than per UI frame: a reverse-DNS hostname
+	// when the network has one for this peer, otherwise the bare IP. See
+	// `reverse_dns::resolve_label` for the timeout/fallback behavior - this
+	// never blocks pairing waiting on DNS.
+	let peer_label = reverse_dns::resolve_label(peer_ip).await;
+
+	let pin_notifier = client_manager.add_pending(unique_id.clone(), client_pem, salt, device_name, peer_label);
 
 	// Guards this await: if the client disconnects (Moonlight quit, network
 	// drop) before a PIN arrives, hyper cancels this handler future, this
