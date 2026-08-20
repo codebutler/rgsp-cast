@@ -73,8 +73,24 @@ impl Buttons {
 
 /// Vertical position of row `index`, in scaled pixels. A free function, not
 /// a method, so it stays unit-testable without an open display.
+///
+/// Offset by `scale1(PADDING)` below the header band: `header()` draws its
+/// title at `y = scale1(PADDING)`, and `Ui::hardware_group()` (the
+/// battery/wifi/bt status pill every screen now draws) occupies the same
+/// `scale1(PADDING)..scale1(PADDING) + scale1(PILL_SIZE)` band. Without the
+/// offset, row 0 started at `scale1(PILL_SIZE)` — 20px inside that band —
+/// and its pill visibly overlapped both on hardware.
+///
+/// `nextui.c`'s own file browser positions its rows the same way,
+/// `SCALE1(row_index * PILL_SIZE + PADDING)`, but that screen has no
+/// separate header band to clear — its row 0 sits at `scale1(PADDING)`
+/// (20px), level with its own hardware group, because that list is the
+/// only content on the screen. Ours is not: `header()`'s title text
+/// occupies the same band `hardware_group()` does, so row 0 has to clear
+/// a full `scale1(PADDING) + scale1(PILL_SIZE)` (80px) before it, one
+/// `scale1(PADDING)` further down than that reference.
 fn row_y(index: i32) -> i32 {
-    sys::scale1(sys::PILL_SIZE as i32) * (index + 1)
+    sys::scale1(PADDING) + sys::scale1(sys::PILL_SIZE as i32) * (index + 1)
 }
 
 /// The open NextUI display, and everything acquired to open it.
@@ -466,8 +482,16 @@ mod tests {
     }
 
     #[test]
+    fn row_y_starts_below_the_header_band() {
+        // The header band -- header()'s title and hardware_group()'s
+        // status pill -- occupies scale1(PADDING)..scale1(PADDING +
+        // PILL_SIZE). Row 0 must start at its bottom edge, not overlap it.
+        let header_band_bottom = crate::sys::scale1(PADDING) + crate::sys::scale1(crate::sys::PILL_SIZE as i32);
+        assert_eq!(row_y(0), header_band_bottom);
+    }
+
+    #[test]
     fn row_y_positions_step_by_a_scaled_pill() {
-        assert_eq!(row_y(0), crate::sys::scale1(crate::sys::PILL_SIZE as i32));
         assert_eq!(
             row_y(1) - row_y(0),
             crate::sys::scale1(crate::sys::PILL_SIZE as i32)
