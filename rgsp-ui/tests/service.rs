@@ -243,11 +243,17 @@ fn stop_fails_on_a_malformed_pidfile() {
 #[test]
 fn stop_succeeds_on_a_stale_pidfile_whose_process_is_gone() {
     let (pak_dir, run_dir) = temp_dirs("stop-stale-pidfile");
-    // Above the default pid_max; guaranteed not to be a live process. Nobody
-    // holds the file's flock either (it was never opened by a daemon), so
-    // this is caught by the lock probe before `stop()` would ever attempt to
-    // signal a pid this far into unallocated territory.
-    std::fs::write(run_dir.join("daemon.pid"), "999999").expect("write stale pidfile");
+    // A genuinely dead pid, not an assumed one: pid_max can be (and often
+    // is, on 64-bit kernels) raised well past the traditional 32768, so a
+    // hardcoded "above default pid_max" constant is not reliably dead.
+    // Spawning and reaping a real child guarantees the pid is free again --
+    // nobody holds the file's flock either (it was never opened by a
+    // daemon), so this is caught by the lock probe before `stop()` would
+    // ever attempt to signal it.
+    let mut child = std::process::Command::new("true").spawn().expect("spawn short-lived process");
+    let dead_pid = child.id();
+    child.wait().expect("reap short-lived process");
+    std::fs::write(run_dir.join("daemon.pid"), dead_pid.to_string()).expect("write stale pidfile");
 
     let service = Service::new_with_timeouts(pak_dir, run_dir, Duration::from_secs(5), Duration::from_millis(300));
     service.stop().expect("stop() should tolerate a stale pidfile naming a pid that's already gone");
