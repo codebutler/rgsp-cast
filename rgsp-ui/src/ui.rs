@@ -99,6 +99,22 @@ fn header_band_height() -> i32 {
     sys::scale1(PADDING + sys::PILL_SIZE as i32 + sys::BUTTON_MARGIN as i32)
 }
 
+/// The width available for [`Ui::header`]'s title before it must clear
+/// `hardware_group()`'s status pill, in scaled pixels. `screen_w` and
+/// `chrome_width` (the pill's own width, from `hardware_group()`'s return
+/// value) are parameters rather than reading `self` directly, so this stays
+/// unit-testable without an open display — same split as [`row_y`].
+///
+/// `chrome_x` mirrors `GFX_blitHardwareGroup`'s own `ox = dst->w -
+/// SCALE1(PADDING) - ow` (`api.c:2367`); the title then gets one more
+/// `scale1(PADDING)` of breathing room before that edge, minus the
+/// `scale1(PADDING)` inset `header()` itself draws the title at.
+fn header_max_width(screen_w: i32, chrome_width: i32) -> i32 {
+    let pad = sys::scale1(PADDING);
+    let chrome_x = screen_w - pad - chrome_width;
+    chrome_x - pad - pad
+}
+
 /// Vertical position of row `index`, in scaled pixels. A free function, not
 /// a method, so it stays unit-testable without an open display.
 ///
@@ -258,17 +274,30 @@ impl Ui {
     /// `IndicatorType`, so it falls through to the battery/wifi/bt/clock
     /// pill every screen shows outside of actively adjusting a hardware
     /// setting — which neither of ours ever does.
-    pub fn hardware_group(&mut self) {
+    ///
+    /// Returns the pill's width in pixels, straight from the C function's
+    /// own return value — pass it to [`Ui::header`] so a long title
+    /// truncates before running into the pill. This width is **not**
+    /// something we can compute from constants: in the `show_setting = 0`
+    /// branch (`api.c:2308` on), it depends on live state (`BT_isConnected`,
+    /// `PLAT_connectionStrength`, `CFG_getShowClock`, the audio sink) and on
+    /// `asset_rects[...]` — PNG dimensions loaded at runtime, never exposed
+    /// to us. `GFX_blitHardwareGroup` already computes the real value to
+    /// draw the pill; reusing its return is exact, not a guess.
+    pub fn hardware_group(&mut self) -> i32 {
         // SAFETY: screen is valid for the lifetime of `self`.
-        unsafe {
-            sys::GFX_blitHardwareGroup(self.screen, 0);
-        }
+        unsafe { sys::GFX_blitHardwareGroup(self.screen, 0) }
     }
 
-    /// Draw a page title at the top of the screen.
-    pub fn header(&mut self, title: &str) {
+    /// Draw a page title at the top of the screen, truncated so it does not
+    /// run into the status pill `hardware_group()` draws in the same band.
+    /// `chrome_width` is that pill's width — its caller-visible return
+    /// value — so the boundary here always matches what was actually drawn,
+    /// not a recomputed (and possibly stale) guess at it.
+    pub fn header(&mut self, title: &str, chrome_width: i32) {
         let pad = sys::scale1(PADDING);
-        self.blit_text(title, pad, pad, COLOR_WHITE);
+        let title = self.truncate(title, header_max_width(self.w, chrome_width));
+        self.blit_text(&title, pad, pad, COLOR_WHITE);
     }
 
     /// The font's line height, in pixels. Used to centre text against a
@@ -520,5 +549,29 @@ mod tests {
             row_y(1) - row_y(0),
             crate::sys::scale1(crate::sys::PILL_SIZE as i32)
         );
+    }
+
+    #[test]
+    fn header_max_width_reserves_a_pad_of_room_before_the_status_pill() {
+        let pad = crate::sys::scale1(PADDING);
+        let screen_w = 720;
+        let chrome_w = 260; // a plausible hardware_group() width, not a real one
+        // header_max_width's boundary (chrome_x) must land exactly one
+        // `pad` short of where hardware_group() actually starts its pill --
+        // any less and a title truncated to fit still touches the chrome.
+        let chrome_x = screen_w - pad - chrome_w;
+        assert_eq!(header_max_width(screen_w, chrome_w), chrome_x - pad - pad);
+    }
+
+    #[test]
+    fn header_max_width_shrinks_exactly_as_the_status_pill_grows() {
+        // A wider status pill (more of WiFi/BT/clock showing) must eat
+        // directly into the title's budget, pixel for pixel -- otherwise a
+        // title that fit a moment ago could start overlapping the chrome
+        // the next frame the pill grows, with nothing here to catch it.
+        let screen_w = 720;
+        let narrow = header_max_width(screen_w, 60);
+        let wide = header_max_width(screen_w, 260);
+        assert_eq!(narrow - wide, 260 - 60);
     }
 }

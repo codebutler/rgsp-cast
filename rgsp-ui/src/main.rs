@@ -134,7 +134,8 @@ fn main() -> anyhow::Result<()> {
                     // the buffer that won't be shown until the next flip.
                     for _ in 0..2 {
                         ui.begin();
-                        ui.header("Cast");
+                        let chrome_w = ui.hardware_group();
+                        ui.header("Cast", chrome_w);
                         ui.row("Service", Some(message), 0, true);
                         ui.hints(&[]);
                         ui.end();
@@ -174,7 +175,8 @@ fn main() -> anyhow::Result<()> {
                     // next flip.
                     for _ in 0..2 {
                         ui.begin();
-                        ui.header("Pair");
+                        let chrome_w = ui.hardware_group();
+                        ui.header("Pair", chrome_w);
                         ui.row(&pin.label(), Some("Pairing..."), 0, true);
                         ui.hints(&[]);
                         ui.end();

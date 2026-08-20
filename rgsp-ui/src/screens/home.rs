@@ -131,8 +131,8 @@ impl Home {
     }
 
     pub fn draw(&self, ui: &mut Ui, state: &CastState, connected: bool) {
-        ui.hardware_group();
-        ui.header("Cast");
+        let chrome_w = ui.hardware_group();
+        ui.header("Cast", chrome_w);
 
         let status = Self::status_text(state, connected);
         ui.row("Service", Some(&status), 0, self.selected == 0);

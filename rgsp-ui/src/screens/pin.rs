@@ -101,8 +101,8 @@ impl Pin {
     }
 
     pub fn draw(&self, ui: &mut Ui) {
-        ui.hardware_group();
-        ui.header(&format!("Pair with {}", self.label()));
+        let chrome_w = ui.hardware_group();
+        ui.header(&format!("Pair with {}", self.label()), chrome_w);
         if let Some(err) = &self.error {
             ui.row(err, None, 0, false);
         }
