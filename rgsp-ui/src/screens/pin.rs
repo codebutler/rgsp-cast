@@ -36,6 +36,13 @@ impl Pin {
         &self.client_id
     }
 
+    /// The label to show for the client being paired: its name if the
+    /// daemon reported one, otherwise the same truncated id fallback as the
+    /// home screen's pending list (see [`crate::screens::client_label`]).
+    pub fn label(&self) -> String {
+        crate::screens::client_label(self.client_name.as_deref(), &self.client_id)
+    }
+
     /// Advance the cursor and/or the digit under it.
     ///
     /// Left/right move the cursor but do **not** wrap: overshooting past the
@@ -92,8 +99,7 @@ impl Pin {
     }
 
     pub fn draw(&self, ui: &mut Ui) {
-        let who = self.client_name.as_deref().unwrap_or(&self.client_id);
-        ui.header(&format!("Pair with {who}"));
+        ui.header(&format!("Pair with {}", self.label()));
         if let Some(err) = &self.error {
             ui.row(err, None, 0, false);
         }
@@ -188,5 +194,17 @@ mod tests {
     fn client_id_is_reported_back_for_submit_pin() {
         let p = Pin::new("client-123".into(), Some("phone".into()));
         assert_eq!(p.client_id(), "client-123");
+    }
+
+    #[test]
+    fn label_falls_back_to_a_truncated_id_without_a_name() {
+        let p = Pin::new("A1B2C3D4E5F60718".into(), None);
+        assert_eq!(p.label(), "A1B2C3D4");
+    }
+
+    #[test]
+    fn label_prefers_the_name_when_present() {
+        let p = Pin::new("A1B2C3D4E5F60718".into(), Some("phone".into()));
+        assert_eq!(p.label(), "phone");
     }
 }

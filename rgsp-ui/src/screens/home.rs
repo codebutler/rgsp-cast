@@ -90,8 +90,8 @@ impl Home {
         ui.row("Service", Some(status), 0, self.selected == 0);
 
         for (i, entry) in state.pending.iter().enumerate() {
-            let label = entry.name.as_deref().unwrap_or(&entry.id);
-            ui.row(label, Some(">"), (i + 1) as i32, self.selected == i + 1);
+            let label = crate::screens::client_label(entry.name.as_deref(), &entry.id);
+            ui.row(&label, Some(">"), (i + 1) as i32, self.selected == i + 1);
         }
 
         ui.hints(&[("A", self.a_hint(state)), ("B", "Exit")]);

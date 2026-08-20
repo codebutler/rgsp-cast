@@ -150,7 +150,7 @@ fn main() -> anyhow::Result<()> {
                     for _ in 0..2 {
                         ui.begin();
                         ui.header("Pair");
-                        ui.row("Pairing", Some("Pairing..."), 0, true);
+                        ui.row(&pin.label(), Some("Pairing..."), 0, true);
                         ui.hints(&[]);
                         ui.end();
                     }
