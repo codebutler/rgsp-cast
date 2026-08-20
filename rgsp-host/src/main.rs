@@ -23,7 +23,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use rgsp_host::audio::{CHANNELS, LoopbackCapture, PERIOD_FRAMES};
-use rgsp_host::control::{ControlHandle, PendingEntry};
+use rgsp_host::control::{ControlHandle, PairedEntry, PendingEntry};
 use rgsp_host::daemon::PidFile;
 use rgsp_host::routing::CastSink;
 use rgsp_host::video::{IdrRequester, ResetRequester, VideoConfig, VideoStream};
@@ -266,17 +266,18 @@ async fn serve(config: Config, control: &ControlHandle) -> anyhow::Result<()> {
 
     tracing::info!("rgsp-host is ready and waiting for connections");
 
-    // Step 5: keep the UI's pending-pairing list current. `pending_changed`
-    // fires after every mutation of the pending set, including removal on
-    // successful pairing — and it can fire four times in a row at machine
-    // pace during the handshake (`clients.rs:155,205,239,274`). `Notify::
+    // Step 5: keep the UI's pending-pairing and paired-device lists current.
+    // `pending_changed` fires after every mutation of either — pairing
+    // completing, `ClientManager::unpair`, or a pending client being added
+    // or removed — and it can fire four times in a row at machine pace
+    // during the handshake (`clients.rs:155,205,239,274`). `Notify::
     // notify_waiters` stores no permit: it only wakes waiters already
     // registered, so we register (`enable()`) before ever reading state, and
     // re-register immediately after each fire — before the next async call —
     // so a fire landing while we're mid-update is still caught rather than
-    // lost outright. `pending` is a full replacement, not a diff, so a lost
-    // fire wouldn't just be late; it could leave the UI stuck on a stale list
-    // forever.
+    // lost outright. Both `pending` and `paired` are full replacements, not
+    // diffs, so a lost fire wouldn't just be late; it could leave the UI
+    // stuck on a stale list forever.
     let pending_watcher = {
         let control = control.clone();
         let client_manager = client_manager.clone();
@@ -287,11 +288,13 @@ async fn serve(config: Config, control: &ControlHandle) -> anyhow::Result<()> {
             notified.as_mut().enable();
 
             control.set_pending(pending_entries(&client_manager));
+            control.set_paired(paired_entries(&client_manager));
             loop {
                 notified.as_mut().await;
                 notified.set(changed.notified());
                 notified.as_mut().enable();
                 control.set_pending(pending_entries(&client_manager));
+                control.set_paired(paired_entries(&client_manager));
             }
         })
     };
@@ -321,6 +324,19 @@ fn pending_entries(client_manager: &ClientManager) -> Vec<PendingEntry> {
         .pending_clients()
         .into_iter()
         .map(|p| PendingEntry { id: p.id, name: normalize_devicename(p.name), address: p.address })
+        .collect()
+}
+
+/// Same mapping as `pending_entries`, for the paired list:
+/// `ClientManager::paired_clients` returns moonshine-core's `PairedInfo`,
+/// the control socket's wire type is `PairedEntry`. `normalize_devicename`
+/// applies here too — the label persisted at pairing time is the raw
+/// `devicename` moonshine-core saw, `roth` included.
+fn paired_entries(client_manager: &ClientManager) -> Vec<PairedEntry> {
+    client_manager
+        .paired_clients()
+        .into_iter()
+        .map(|p| PairedEntry { fingerprint: p.fingerprint, name: normalize_devicename(p.name), address: p.address })
         .collect()
 }
 

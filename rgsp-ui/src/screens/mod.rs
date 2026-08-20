@@ -1,10 +1,12 @@
 //! Screens: pure input/state logic (unit-testable off-device) plus a thin
 //! `draw` method that is the only part touching [`crate::ui::Ui`].
 
+pub mod confirm;
 pub mod home;
 pub mod message;
 pub mod pairing;
 pub mod pin;
+pub mod unpairing;
 
 /// Label a client for the pairing UI: a real name if one ever arrives,
 /// otherwise its IP address, otherwise the first 8 characters of its id.

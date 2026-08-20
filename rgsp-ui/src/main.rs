@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use rgsp_ui::rpc::{CastState, Control, PinOutcome};
+use rgsp_ui::screens::confirm::{Confirm, ConfirmAction};
 use rgsp_ui::screens::home::{Home, HomeAction};
 use rgsp_ui::screens::message::Message;
 use rgsp_ui::screens::pairing::{self, PairingAction};
 use rgsp_ui::screens::pin::{Pin, PinAction};
+use rgsp_ui::screens::unpairing::{self, UnpairingAction};
 use rgsp_ui::service::Service;
 use rgsp_ui::ui::Ui;
 
@@ -59,6 +61,15 @@ enum Screen {
     /// A pairing attempt ended (rejected, or the connection was lost) and
     /// there is nothing left to do but tell the user and wait for `B`.
     Message(Message),
+    /// `A` on a paired row: confirm before actually unpairing it.
+    /// Unpairing is destructive and easy to hit by accident on a D-pad, so
+    /// it does not fire straight off the home row's `A` press.
+    Confirm(Confirm),
+    /// An unpair confirmed; waiting on the daemon's answer
+    /// ([`Control::poll_unpair`]). Carries the fingerprint and label so the
+    /// eventual outcome message can name the device, mirroring `Pairing`
+    /// carrying its `Pin`.
+    Unpairing(String, String),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -95,7 +106,7 @@ fn main() -> anyhow::Result<()> {
     // than waiting on this one to heal itself (it never will).
     let mut control = Control::connect(&socket_path.to_string_lossy()).ok();
     let mut last_reconnect_attempt = Some(Instant::now());
-    let mut state = CastState { casting: false, client: None, pending: Vec::new() };
+    let mut state = CastState { casting: false, client: None, pending: Vec::new(), paired: Vec::new() };
     let mut screen = Screen::Home(Home::new());
 
     loop {
@@ -111,7 +122,7 @@ fn main() -> anyhow::Result<()> {
                 control = Control::connect(&socket_path.to_string_lossy()).ok();
                 last_reconnect_attempt = Some(now);
                 if control.is_none() {
-                    state = CastState { casting: false, client: None, pending: Vec::new() };
+                    state = CastState { casting: false, client: None, pending: Vec::new(), paired: Vec::new() };
                 }
             }
         }
@@ -173,6 +184,18 @@ fn main() -> anyhow::Result<()> {
                     let name = entry.and_then(|p| p.name.clone());
                     let address = entry.and_then(|p| p.address.clone());
                     Screen::Pin(Pin::new(id, name, address))
+                }
+                HomeAction::Unpair(fingerprint) => {
+                    // A stale list (the daemon already removed this entry
+                    // between two frames) just falls through to the
+                    // truncated-fingerprint fallback `client_label` already
+                    // gives an unnamed, unaddressed client — never an empty
+                    // label.
+                    let entry = state.paired.iter().find(|p| p.fingerprint == fingerprint);
+                    let name = entry.and_then(|p| p.name.as_deref());
+                    let address = entry.and_then(|p| p.address.as_deref());
+                    let label = rgsp_ui::screens::client_label(name, address, &fingerprint);
+                    Screen::Confirm(Confirm::new(fingerprint, label))
                 }
                 HomeAction::Exit => break,
             },
@@ -246,6 +269,48 @@ fn main() -> anyhow::Result<()> {
                     Screen::Message(message)
                 }
             }
+            Screen::Confirm(confirm) => match confirm.update(&buttons) {
+                ConfirmAction::None => Screen::Confirm(confirm),
+                ConfirmAction::Cancel => Screen::Home(Home::new()),
+                ConfirmAction::Confirm => {
+                    let fingerprint = confirm.fingerprint().to_string();
+                    let label = confirm.label().to_string();
+                    match control.as_mut() {
+                        Some(c) => {
+                            // Non-blocking, same split as `submit_pin`: the
+                            // frame loop keeps running and `Unpairing`'s own
+                            // screen gets drawn and stays live.
+                            c.start_unpair(&fingerprint);
+                            Screen::Unpairing(fingerprint, label)
+                        }
+                        None => Screen::Message(Message::new("Not connected to the service.")),
+                    }
+                }
+            },
+            Screen::Unpairing(fingerprint, label) => match unpairing::update(&buttons) {
+                UnpairingAction::Cancel => {
+                    if let Some(c) = control.as_mut() {
+                        c.cancel_unpair();
+                    }
+                    Screen::Home(Home::new())
+                }
+                UnpairingAction::None => match control.as_mut().and_then(Control::poll_unpair) {
+                    None => Screen::Unpairing(fingerprint, label), // still waiting
+                    // Confirm it worked, the same reason `submit_pin`'s
+                    // success gets a `Message` rather than a silent return
+                    // to Home: the paired row just vanishing looks
+                    // identical to any other list update.
+                    Some(Ok(true)) => Screen::Message(Message::new(format!("Unpaired {label}."))),
+                    // Already not paired (e.g. the list was stale by a
+                    // frame): nothing left to do, but still worth saying so
+                    // the user isn't left wondering.
+                    Some(Ok(false)) => Screen::Message(Message::new(format!("{label} was already unpaired."))),
+                    Some(Err(e)) => {
+                        tracing::warn!("unpair failed: {e:#}");
+                        Screen::Message(Message::new("Connection lost."))
+                    }
+                },
+            },
         };
 
         match &screen {
@@ -253,6 +318,8 @@ fn main() -> anyhow::Result<()> {
             Screen::Pin(pin) => pin.draw(&mut ui),
             Screen::Pairing(_) => pairing::draw(&mut ui),
             Screen::Message(message) => message.draw(&mut ui),
+            Screen::Confirm(confirm) => confirm.draw(&mut ui),
+            Screen::Unpairing(_, _) => unpairing::draw(&mut ui),
         }
         ui.end();
     }

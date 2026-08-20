@@ -94,6 +94,27 @@ pub struct PendingInfo {
 	pub address: Option<String>,
 }
 
+/// An already-paired client, as shown by the on-device UI's paired-devices
+/// list. Keyed on `fingerprint`, not a client id: every real Moonlight
+/// client hardcodes `uniqueid=0123456789ABCDEF` unless a build opts into a
+/// true unique id (`m_UseTrueUid`, off by default), so two different
+/// machines can and do share one `uniqueid` — the client certificate's
+/// SHA-256 fingerprint is the only thing here that actually distinguishes
+/// one paired machine from another.
+///
+/// `name`/`address` are a snapshot of [`PendingClient::name`]/
+/// [`PendingClient::address`] taken the moment pairing completed, not a
+/// live lookup — DHCP churn after that can make either stale, and two
+/// entries can legitimately show the same label if two machines paired
+/// from the same address at different times. The fingerprint is what stays
+/// true; the label is best-effort for a human to recognize the row.
+#[derive(Clone, Debug)]
+pub struct PairedInfo {
+	pub fingerprint: String,
+	pub name: Option<String>,
+	pub address: Option<String>,
+}
+
 /// Manages client pairing state and operations.
 ///
 /// This is a synchronous manager backed by an `Arc<RwLock>`. It holds pending client state
@@ -103,7 +124,11 @@ pub struct ClientManager {
 	pending_clients: Arc<RwLock<BTreeMap<String, PendingClient>>>,
 
 	/// Fires whenever the pending set changes, so a subscriber can push a
-	/// fresh snapshot instead of polling.
+	/// fresh snapshot instead of polling. Also fires on every paired-list
+	/// change (pairing completing, or [`ClientManager::unpair`]) — the name
+	/// predates the paired list, but it is the one "something the on-device
+	/// UI shows just changed" signal this crate has, and reusing it means
+	/// callers only ever have to watch one `Notify`.
 	pending_changed: Arc<Notify>,
 
 	state: PersistentState,
@@ -228,6 +253,35 @@ impl ClientManager {
 		self.state.has_paired_cert(fingerprint.to_string())
 	}
 
+	/// Every paired client, for the on-device UI's paired-devices list.
+	/// Empty (rather than an error) if the state lock is poisoned, same
+	/// fail-open-to-empty precedent as [`Self::pending_clients`].
+	pub fn paired_clients(&self) -> Vec<PairedInfo> {
+		self.state
+			.paired_certs()
+			.unwrap_or_else(|()| {
+				tracing::error!("Failed to read paired certs");
+				Vec::new()
+			})
+			.into_iter()
+			.map(|(fingerprint, name, address)| PairedInfo { fingerprint, name, address })
+			.collect()
+	}
+
+	/// Unpair a client by certificate fingerprint (see [`PairedInfo`] for
+	/// why that, not a client id, is the key). Returns `true` if it was
+	/// paired and is now removed, `false` if it was already not paired.
+	/// Signals [`Self::pending_changed`] on an actual removal, so the
+	/// on-device UI's paired list updates live, the same as pairing
+	/// completing does.
+	pub fn unpair(&self, fingerprint: &str) -> Result<bool, ()> {
+		let removed = self.state.remove_paired_cert(fingerprint)?;
+		if removed {
+			self.pending_changed.notify_waiters();
+		}
+		Ok(removed)
+	}
+
 	pub fn register_pin(&self, id: &str, pin: &str) -> Result<(), ()> {
 		let mut inner = self.pending_clients.write().map_err(|poison| {
 			tracing::error!("RwLock poisoned: {poison}");
@@ -339,8 +393,13 @@ impl ClientManager {
 
 		let fingerprint = cert_pem_fingerprint(&client.pem);
 		if let Some(fp) = &fingerprint {
+			// Label the fingerprint with whatever this pending client had at
+			// the moment it paired — see `PairedInfo`'s doc comment: this is
+			// the only point where that label is available, since pairing
+			// completing is also what removes the `PendingClient` it lives
+			// on (`inner.remove(id)` below).
 			self.state
-				.add_paired_cert(fp.clone())
+				.add_paired_cert(fp.clone(), client.name.clone(), client.address.clone())
 				.map_err(|_| tracing::warn!("Failed to persist paired certificate: {fp}"))?;
 		}
 

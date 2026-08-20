@@ -1,5 +1,5 @@
 //! Home screen: one vertical list, the service row first, then one row per
-//! pending connection.
+//! pending connection, then one row per already-paired device.
 //!
 //! [`Home::update`] is pure — no [`Ui`], no FFI — so it unit-tests
 //! off-device; only [`Home::draw`] touches `Ui`.
@@ -16,25 +16,44 @@ pub enum HomeAction {
     Toggle,
     /// `A` on a pending row: open PIN entry for this client id.
     Pair(String),
+    /// `A` on a paired row: ask to confirm unpairing this certificate
+    /// fingerprint. Carries the fingerprint, not a row index — the same
+    /// reasoning as [`HomeAction::Pair`] carrying a client id, so the
+    /// caller (`main.rs`) never has to re-derive which device this was
+    /// from a row position that may already be stale by the next frame.
+    Unpair(String),
     /// `B`: leave the app.
     Exit,
 }
 
-/// How many rows — the service row plus pending rows — actually get drawn.
-/// Capped at [`crate::ui::MAIN_ROW_COUNT`]: NextUI reserves that many
+/// How many pending rows and how many paired rows actually get drawn, in
+/// that order — pending first, since a client waiting on a person to type
+/// a PIN is more time-sensitive than a row that is purely informational —
+/// so a long paired list is what gets truncated when both groups together
+/// would not fit. Capped so `1 (service row) + pending + paired` never
+/// exceeds [`crate::ui::MAIN_ROW_COUNT`]: NextUI reserves that many
 /// `PILL_SIZE` rows total once the top status band and bottom hint band are
 /// accounted for, and drawing past it would run rows under the hint group
-/// and off the bottom of the panel. No scrolling: realistically there is
-/// one pending client, occasionally two, so simply not drawing past the cap
-/// is enough — a client beyond it just has no row until an earlier one
-/// clears (paired or abandoned), the same as it would if it hadn't
-/// connected yet.
+/// and off the bottom of the panel. No scrolling: realistically there are
+/// only ever a handful of entries across both lists, so simply not drawing
+/// past the cap is enough — an entry beyond it just has no row until an
+/// earlier one clears, the same as it would if it weren't there yet.
 ///
 /// A free function, not a method, so both [`Home::update`] (to clamp the
-/// cursor) and [`Home::draw`] (to cap the loop) call the exact same
-/// computation — they can never disagree about how many rows exist.
+/// cursor and route `A`) and [`Home::draw`] (to cap the loops) call the
+/// exact same computation — they can never disagree about how many rows
+/// exist or where the pending/paired boundary falls.
+fn visible_rows(state: &CastState) -> (usize, usize) {
+    let budget = (crate::ui::MAIN_ROW_COUNT as usize).saturating_sub(1); // minus the service row
+    let pending = state.pending.len().min(budget);
+    let paired = state.paired.len().min(budget - pending);
+    (pending, paired)
+}
+
+/// Total rows drawn, service row included. See [`visible_rows`].
 fn visible_row_count(state: &CastState) -> usize {
-    (1 + state.pending.len()).min(crate::ui::MAIN_ROW_COUNT as usize)
+    let (pending, paired) = visible_rows(state);
+    1 + pending + paired
 }
 
 /// The home screen's cursor position. Just an index into a list that is
@@ -53,14 +72,15 @@ impl Home {
     /// Advance the cursor and/or act on the current selection.
     ///
     /// The cursor is clamped against `state` before anything else runs, on
-    /// every call — not just when the list shrinks visibly. The daemon can
-    /// remove a pending client (pairing completes or is abandoned) between
-    /// two frames while the cursor still sits on that row, so clamping
-    /// against a remembered row count would let `A` act on a row that no
-    /// longer exists. Clamping against the row count `state` reports *right
-    /// now* is what makes that impossible. That row count is also capped at
-    /// [`visible_row_count`] — the cursor must never land on a row `draw`
-    /// does not actually draw, on-screen or off.
+    /// every call — not just when a list shrinks visibly. The daemon can
+    /// remove a pending client (pairing completes or is abandoned) or a
+    /// paired one (unpaired from elsewhere, or this same screen a moment
+    /// ago) between two frames while the cursor still sits on that row, so
+    /// clamping against a remembered row count would let `A` act on a row
+    /// that no longer exists. Clamping against the row count `state`
+    /// reports *right now* is what makes that impossible. That row count is
+    /// also capped at [`visible_row_count`] — the cursor must never land on
+    /// a row `draw` does not actually draw, on-screen or off.
     ///
     /// `A` on the service row always returns `Toggle` — which direction
     /// that means (start vs. stop) is decided by the caller from socket
@@ -83,9 +103,11 @@ impl Home {
         }
 
         if buttons.a {
+            let (pending_rows, _paired_rows) = visible_rows(state);
             return match self.selected {
                 0 => HomeAction::Toggle,
-                i => HomeAction::Pair(state.pending[i - 1].id.clone()),
+                i if i <= pending_rows => HomeAction::Pair(state.pending[i - 1].id.clone()),
+                i => HomeAction::Unpair(state.paired[i - 1 - pending_rows].fingerprint.clone()),
             };
         }
 
@@ -93,18 +115,19 @@ impl Home {
     }
 
     /// What the `A` button's hint label should read for the current
-    /// selection: `Pair` on a pending row (that's what `A` does there),
-    /// `Start`/`Stop` on the service row, mirroring `connected` -- the
-    /// daemon's liveness, not `casting`. Pure — no `Ui` — so this stays
-    /// unit-testable alongside `update`, the same FFI-free split. The hint
-    /// bar is the only affordance this device has for what a button does,
-    /// so it must always name the action `A` is actually about to take, not
-    /// just what it would do on a different row.
-    fn a_hint(&self, connected: bool) -> &'static str {
+    /// selection: `Pair` on a pending row, `Unpair` on a paired row (that's
+    /// what `A` does there), `Start`/`Stop` on the service row, mirroring
+    /// `connected` -- the daemon's liveness, not `casting`. Pure — no `Ui`
+    /// — so this stays unit-testable alongside `update`, the same FFI-free
+    /// split. The hint bar is the only affordance this device has for what
+    /// a button does, so it must always name the action `A` is actually
+    /// about to take, not just what it would do on a different row.
+    fn a_hint(&self, state: &CastState, connected: bool) -> &'static str {
         if self.selected == 0 {
             if connected { "Stop" } else { "Start" }
         } else {
-            "Pair"
+            let (pending_rows, _paired_rows) = visible_rows(state);
+            if self.selected <= pending_rows { "Pair" } else { "Unpair" }
         }
     }
 
@@ -137,15 +160,27 @@ impl Home {
         let status = Self::status_text(state, connected);
         ui.row("Service", Some(&status), 0, self.selected == 0);
 
-        // The service row above already claimed one of visible_row_count's
-        // slots, so at most `visible_row_count(state) - 1` pending rows fit.
-        let max_pending_rows = visible_row_count(state) - 1;
-        for (i, entry) in state.pending.iter().enumerate().take(max_pending_rows) {
+        let (pending_rows, paired_rows) = visible_rows(state);
+
+        for (i, entry) in state.pending.iter().enumerate().take(pending_rows) {
             let label = crate::screens::client_label(entry.name.as_deref(), entry.address.as_deref(), &entry.id);
             ui.row(&label, None, (i + 1) as i32, self.selected == i + 1);
         }
 
-        ui.hints(&[("A", self.a_hint(connected)), ("B", "Exit")]);
+        // Paired rows sit right after the pending rows, so their index
+        // (both for drawing and for cursor comparison) is offset by however
+        // many pending rows are actually shown. A "Paired" value marks the
+        // row as belonging to this second group, at a glance -- otherwise
+        // it would look like just another pending row with no visible
+        // difference.
+        for (i, entry) in state.paired.iter().enumerate().take(paired_rows) {
+            let label =
+                crate::screens::client_label(entry.name.as_deref(), entry.address.as_deref(), &entry.fingerprint);
+            let row = pending_rows + i + 1;
+            ui.row(&label, Some("Paired"), row as i32, self.selected == row);
+        }
+
+        ui.hints(&[("A", self.a_hint(state, connected)), ("B", "Exit")]);
     }
 }
 
@@ -158,7 +193,7 @@ impl Default for Home {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::PendingEntry;
+    use crate::rpc::{PairedEntry, PendingEntry};
 
     fn down() -> Buttons {
         Buttons { down: true, ..Default::default() }
@@ -172,16 +207,19 @@ mod tests {
         Buttons { b: true, ..Default::default() }
     }
 
+    fn state_with(pending: Vec<PendingEntry>, paired: Vec<PairedEntry>) -> CastState {
+        CastState { casting: false, client: None, pending, paired }
+    }
+
     #[test]
     fn selection_moves_across_service_row_and_pending_rows() {
-        let state = CastState {
-            casting: true,
-            client: None,
-            pending: vec![
+        let state = state_with(
+            vec![
                 PendingEntry { id: "AA".into(), name: Some("eric-mbp".into()), address: None },
                 PendingEntry { id: "BB".into(), name: None, address: None },
             ],
-        };
+            vec![],
+        );
         let mut home = Home::new();
         assert_eq!(home.update(&down(), &state), HomeAction::None);
         assert_eq!(home.update(&a(), &state), HomeAction::Pair("AA".into()));
@@ -189,22 +227,21 @@ mod tests {
 
     #[test]
     fn a_on_the_service_row_toggles() {
-        let state = CastState { casting: false, client: None, pending: vec![] };
+        let state = state_with(vec![], vec![]);
         let mut home = Home::new();
         assert_eq!(home.update(&a(), &state), HomeAction::Toggle);
     }
 
     #[test]
     fn selection_clamps_when_pending_clients_disappear() {
-        let two = CastState {
-            casting: true,
-            client: None,
-            pending: vec![
+        let two = state_with(
+            vec![
                 PendingEntry { id: "AA".into(), name: None, address: None },
                 PendingEntry { id: "BB".into(), name: None, address: None },
             ],
-        };
-        let none = CastState { casting: true, client: None, pending: vec![] };
+            vec![],
+        );
+        let none = state_with(vec![], vec![]);
         let mut home = Home::new();
         home.update(&down(), &two);
         home.update(&down(), &two);
@@ -214,7 +251,7 @@ mod tests {
 
     #[test]
     fn selection_does_not_move_past_the_service_row_when_pending_is_empty() {
-        let state = CastState { casting: false, client: None, pending: vec![] };
+        let state = state_with(vec![], vec![]);
         let mut home = Home::new();
         home.update(&down(), &state);
         assert_eq!(home.update(&a(), &state), HomeAction::Toggle);
@@ -222,44 +259,40 @@ mod tests {
 
     #[test]
     fn a_hint_tracks_the_selection_and_connectivity() {
-        let state = CastState {
-            casting: true,
-            client: None,
-            pending: vec![PendingEntry { id: "AA".into(), name: None, address: None }],
-        };
+        let state = state_with(vec![PendingEntry { id: "AA".into(), name: None, address: None }], vec![]);
         let mut home = Home::new();
         // service row selected, connected: A stops the daemon
-        assert_eq!(home.a_hint(true), "Stop");
+        assert_eq!(home.a_hint(&state, true), "Stop");
         // service row selected, disconnected: A starts it, regardless of `casting`
-        assert_eq!(home.a_hint(false), "Start");
+        assert_eq!(home.a_hint(&state, false), "Start");
 
         home.update(&down(), &state);
         // pending row selected: A pairs here, not toggles the service
-        assert_eq!(home.a_hint(true), "Pair");
+        assert_eq!(home.a_hint(&state, true), "Pair");
     }
 
     #[test]
     fn b_exits() {
-        let state = CastState { casting: false, client: None, pending: vec![] };
+        let state = state_with(vec![], vec![]);
         let mut home = Home::new();
         assert_eq!(home.update(&b(), &state), HomeAction::Exit);
     }
 
     #[test]
     fn connected_and_not_casting_reads_running_and_offers_stop() {
-        let state = CastState { casting: false, client: None, pending: vec![] };
+        let state = state_with(vec![], vec![]);
         let mut home = Home::new();
         assert_eq!(Home::status_text(&state, true), "Running");
         assert_eq!(home.update(&a(), &state), HomeAction::Toggle);
-        assert_eq!(home.a_hint(true), "Stop");
+        assert_eq!(home.a_hint(&state, true), "Stop");
     }
 
     #[test]
     fn connected_and_casting_reads_casting_with_the_client_name() {
         // `casting` on top of a live socket is a third state ("Casting"),
         // not the same row text as an idle-but-connected daemon.
-        let anonymous = CastState { casting: true, client: None, pending: vec![] };
-        let named = CastState { casting: true, client: Some("eric-mbp".into()), pending: vec![] };
+        let anonymous = CastState { casting: true, client: None, pending: vec![], paired: vec![] };
+        let named = CastState { casting: true, client: Some("eric-mbp".into()), pending: vec![], paired: vec![] };
         assert_eq!(Home::status_text(&anonymous, true), "Casting");
         assert_eq!(Home::status_text(&named, true), "Casting (eric-mbp)");
     }
@@ -270,11 +303,11 @@ mod tests {
         // the last state we polled before losing the connection said
         // `casting: true` -- a stale flag from before disconnect must not
         // override the liveness signal.
-        let stale = CastState { casting: true, client: Some("eric-mbp".into()), pending: vec![] };
+        let stale = CastState { casting: true, client: Some("eric-mbp".into()), pending: vec![], paired: vec![] };
         let mut home = Home::new();
         assert_eq!(Home::status_text(&stale, false), "Stopped");
         assert_eq!(home.update(&a(), &stale), HomeAction::Toggle);
-        assert_eq!(home.a_hint(false), "Start");
+        assert_eq!(home.a_hint(&stale, false), "Start");
     }
 
     #[test]
@@ -282,14 +315,10 @@ mod tests {
         let cap = crate::ui::MAIN_ROW_COUNT as usize;
         let plenty: Vec<PendingEntry> =
             (0..cap).map(|i| PendingEntry { id: format!("id{i}"), name: None, address: None }).collect();
-        let over_cap = CastState { casting: false, client: None, pending: plenty };
+        let over_cap = state_with(plenty, vec![]);
         assert_eq!(visible_row_count(&over_cap), cap, "service row + cap - 1 pending rows, not more");
 
-        let one = CastState {
-            casting: false,
-            client: None,
-            pending: vec![PendingEntry { id: "AA".into(), name: None, address: None }],
-        };
+        let one = state_with(vec![PendingEntry { id: "AA".into(), name: None, address: None }], vec![]);
         assert_eq!(visible_row_count(&one), 2, "well under the cap: service row + the one pending row");
     }
 
@@ -302,7 +331,7 @@ mod tests {
         let cap = crate::ui::MAIN_ROW_COUNT as usize - 1; // pending rows that fit
         let pending: Vec<PendingEntry> =
             (0..cap + 3).map(|i| PendingEntry { id: format!("id{i}"), name: None, address: None }).collect();
-        let state = CastState { casting: false, client: None, pending };
+        let state = state_with(pending, vec![]);
         let mut home = Home::new();
 
         for _ in 0..cap + 5 {
@@ -313,5 +342,60 @@ mod tests {
         // service row plus `cap` pending rows, so the last pending row is
         // index `cap - 1`, not one of the clients past the cap.
         assert_eq!(home.update(&a(), &state), HomeAction::Pair(format!("id{}", cap - 1)));
+    }
+
+    #[test]
+    fn paired_rows_follow_pending_rows_and_a_unpairs_them() {
+        let state = state_with(
+            vec![PendingEntry { id: "AA".into(), name: None, address: None }],
+            vec![PairedEntry { fingerprint: "ff00".into(), name: None, address: Some("192.168.1.5".into()) }],
+        );
+        let mut home = Home::new();
+        home.update(&down(), &state); // -> pending row
+        home.update(&down(), &state); // -> paired row
+        assert_eq!(home.update(&a(), &state), HomeAction::Unpair("ff00".into()));
+    }
+
+    #[test]
+    fn a_hint_reads_unpair_on_a_paired_row() {
+        let state = state_with(
+            vec![],
+            vec![PairedEntry { fingerprint: "ff00".into(), name: None, address: None }],
+        );
+        let mut home = Home::new();
+        home.update(&down(), &state);
+        assert_eq!(home.a_hint(&state, true), "Unpair");
+    }
+
+    #[test]
+    fn pending_and_paired_rows_share_the_cap_with_pending_first() {
+        // Enough of both to overflow MAIN_ROW_COUNT together: pending rows
+        // must fill first, and only the remaining budget goes to paired
+        // rows -- not the other way around, and never past the cap.
+        let budget = crate::ui::MAIN_ROW_COUNT as usize - 1;
+        let pending: Vec<PendingEntry> =
+            (0..budget).map(|i| PendingEntry { id: format!("p{i}"), name: None, address: None }).collect();
+        let paired: Vec<PairedEntry> =
+            (0..3).map(|i| PairedEntry { fingerprint: format!("f{i}"), name: None, address: None }).collect();
+        let state = state_with(pending, paired);
+
+        let (pending_rows, paired_rows) = visible_rows(&state);
+        assert_eq!(pending_rows, budget, "pending fills the whole budget");
+        assert_eq!(paired_rows, 0, "nothing left for paired once pending fills the cap");
+        assert_eq!(visible_row_count(&state), 1 + budget);
+    }
+
+    #[test]
+    fn paired_rows_fill_whatever_pending_leaves_behind() {
+        let budget = crate::ui::MAIN_ROW_COUNT as usize - 1;
+        let pending = vec![PendingEntry { id: "p0".into(), name: None, address: None }];
+        let paired: Vec<PairedEntry> = (0..budget + 3)
+            .map(|i| PairedEntry { fingerprint: format!("f{i}"), name: None, address: None })
+            .collect();
+        let state = state_with(pending, paired);
+
+        let (pending_rows, paired_rows) = visible_rows(&state);
+        assert_eq!(pending_rows, 1);
+        assert_eq!(paired_rows, budget - 1, "paired gets whatever budget pending didn't use");
     }
 }

@@ -22,6 +22,17 @@ pub struct PendingEntry {
     pub address: Option<String>,
 }
 
+/// Mirrors `rgsp_host::control::PairedEntry`. Keyed on the client
+/// certificate fingerprint, not a client id — every real Moonlight client
+/// hardcodes the same `uniqueid`, so it cannot tell two paired machines
+/// apart the way the fingerprint can.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PairedEntry {
+    pub fingerprint: String,
+    pub name: Option<String>,
+    pub address: Option<String>,
+}
+
 /// Mirrors `rgsp_host::control::CastState`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CastState {
@@ -37,6 +48,15 @@ pub struct CastState {
     pub casting: bool,
     pub client: Option<String>,
     pub pending: Vec<PendingEntry>,
+    /// `#[serde(default)]`: a daemon predating this field would otherwise
+    /// fail to decode every `state` push, which `Control::poll_state`
+    /// treats as a transport failure and latches `connected = false`
+    /// permanently (see its doc comment) — a live daemon would read as
+    /// stopped forever. Defaulting to empty degrades to "no paired devices
+    /// shown" instead, which is honest for an older daemon that never sent
+    /// this field.
+    #[serde(default)]
+    pub paired: Vec<PairedEntry>,
 }
 
 /// Mirrors `rgsp_host::control::PinResult`. `paired` is the real pairing
@@ -46,7 +66,21 @@ pub struct PinResult {
     pub paired: bool,
 }
 
+/// Mirrors `rgsp_host::control::UnpairResult`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct UnpairResult {
+    pub removed: bool,
+}
+
 const SUBMIT_PIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bound for [`Control::start_unpair`]/[`Control::poll_unpair`]. Unlike
+/// [`SUBMIT_PIN_TIMEOUT`], the daemon does not deliberately wait on
+/// anything for `unpair` (`PinApiServer::unpair` answers as soon as the
+/// state file write completes) — this exists purely as a safety net
+/// against a hung or dead connection, not because a slow answer is
+/// expected.
+const UNPAIR_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The daemon's control socket uses distinct JSON-RPC error codes for the
 /// two ways `submit_pin` can fail while the daemon is alive and answering
@@ -72,6 +106,9 @@ const REJECTED_CODE: i32 = -32001;
 /// spawned task so it fires even on a frame where nothing ever polls the
 /// handle).
 type SubmitPinAttempt = Result<Result<PinResult, jsonrpsee::core::client::Error>, tokio::time::error::Elapsed>;
+
+/// Same shape as [`SubmitPinAttempt`], for [`Control::start_unpair`].
+type UnpairAttempt = Result<Result<UnpairResult, jsonrpsee::core::client::Error>, tokio::time::error::Elapsed>;
 
 /// The daemon's answer to `submit_pin`, once it has actually answered (as
 /// opposed to a transport failure, which is a plain `Err`). See the module
@@ -114,6 +151,13 @@ pub struct Control {
     /// [`Control::poll_submit_pin`]/[`Control::cancel_submit_pin`] has
     /// consumed it.
     pending_pin: Option<tokio::task::JoinHandle<SubmitPinAttempt>>,
+    /// Same as `pending_pin`, for [`Control::start_unpair`]/
+    /// [`Control::poll_unpair`]. A separate field, not a shared slot: the
+    /// two requests are never both in flight from the same screen (nothing
+    /// in this crate starts one while the other is outstanding), but
+    /// keeping them distinct means adding one never has to reason about
+    /// silently clobbering the other's `JoinHandle`.
+    pending_unpair: Option<tokio::task::JoinHandle<UnpairAttempt>>,
 }
 
 impl Control {
@@ -139,7 +183,14 @@ impl Control {
             anyhow::Ok((client, sub))
         })?;
 
-        Ok(Self { runtime, client: std::sync::Arc::new(client), sub, connected: true, pending_pin: None })
+        Ok(Self {
+            runtime,
+            client: std::sync::Arc::new(client),
+            sub,
+            connected: true,
+            pending_pin: None,
+            pending_unpair: None,
+        })
     }
 
     /// True once `connect` succeeded and no subsequent call has observed the
@@ -266,6 +317,73 @@ impl Control {
                 // than being forced into `PinOutcome`.
                 _ => Err(err.into()),
             },
+            Ok(Ok(Err(err))) => {
+                self.connected = false;
+                Err(err.into())
+            }
+        }
+    }
+
+    /// Begins removing a paired client by certificate fingerprint, without
+    /// blocking the frame loop — same non-blocking split as
+    /// [`Control::start_submit_pin`]/[`Control::poll_submit_pin`], and for
+    /// the same reason: the frame loop must keep polling input and drawing
+    /// (the confirm screen's own wait state) while the request is in
+    /// flight, not stall on it.
+    pub fn start_unpair(&mut self, fingerprint: &str) {
+        let client = self.client.clone();
+        let mut params = ObjectParams::new();
+        params.insert("fingerprint", fingerprint).expect("fingerprint is a plain string");
+
+        self.pending_unpair = Some(self.runtime.spawn(async move {
+            tokio::time::timeout(UNPAIR_TIMEOUT, client.request::<UnpairResult, _>("unpair", params)).await
+        }));
+    }
+
+    /// Non-blocking: `None` while the request from [`Control::start_unpair`]
+    /// is still in flight (or if none was ever started), `Some` once it
+    /// resolves. `Ok(true)` means the fingerprint was paired and is now
+    /// removed; `Ok(false)` means it was already not paired (a no-op, not a
+    /// failure — see `UnpairResult`'s doc comment). Same zero-timeout-poll
+    /// precedent as [`Control::poll_submit_pin`].
+    pub fn poll_unpair(&mut self) -> Option<anyhow::Result<bool>> {
+        let handle = self.pending_unpair.as_mut()?;
+        let Ok(join_result) = self.runtime.block_on(async { tokio::time::timeout(Duration::ZERO, handle).await })
+        else {
+            return None; // still pending this frame
+        };
+        self.pending_unpair = None;
+        Some(self.interpret_unpair(join_result))
+    }
+
+    /// Stop waiting on an in-flight [`Control::start_unpair`] request,
+    /// without aborting it — same caveat as [`Control::cancel_submit_pin`]:
+    /// dropping the `JoinHandle` only detaches the spawned task, it does
+    /// not cancel it, so the daemon may still complete the unpair. The
+    /// paired list in `CastState` is what tells the truth about what
+    /// actually happened.
+    pub fn cancel_unpair(&mut self) {
+        self.pending_unpair = None;
+    }
+
+    /// Unwraps the three failure layers a resolved [`Control::start_unpair`]
+    /// request can carry (task join, timeout, RPC error), applying the same
+    /// "which failures mark the connection dead" rule
+    /// [`Control::interpret_submit_pin`] uses: an RPC `Call` error is still
+    /// an answer from a live daemon, everything else means this connection
+    /// is done.
+    fn interpret_unpair(&mut self, join_result: Result<UnpairAttempt, tokio::task::JoinError>) -> anyhow::Result<bool> {
+        match join_result {
+            Err(join_err) => {
+                self.connected = false;
+                Err(anyhow::anyhow!("unpair task did not complete: {join_err}"))
+            }
+            Ok(Err(_elapsed)) => {
+                self.connected = false;
+                Err(anyhow::anyhow!("unpair timed out after {UNPAIR_TIMEOUT:?}"))
+            }
+            Ok(Ok(Ok(UnpairResult { removed }))) => Ok(removed),
+            Ok(Ok(Err(jsonrpsee::core::client::Error::Call(err)))) => Err(err.into()),
             Ok(Ok(Err(err))) => {
                 self.connected = false;
                 Err(err.into())

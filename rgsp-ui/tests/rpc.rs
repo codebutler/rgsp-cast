@@ -71,7 +71,7 @@ fn snapshot_arrives_on_subscribe_and_submit_pin_round_trips() {
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let _server = runtime.block_on(start_server(
         &path,
-        CastState { casting: false, client: None, pending: Vec::new() },
+        CastState { casting: false, client: None, pending: Vec::new(), paired: Vec::new() },
     ));
 
     let mut control = Control::connect(&path).expect("connect");
@@ -108,7 +108,7 @@ fn a_transport_failure_marks_the_connection_dead() {
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let server = runtime.block_on(start_server(
         &path,
-        CastState { casting: false, client: None, pending: Vec::new() },
+        CastState { casting: false, client: None, pending: Vec::new(), paired: Vec::new() },
     ));
 
     let mut control = connected_control(&path);
@@ -142,7 +142,7 @@ async fn start_pin_error_server(
             "state_unsubscribe",
             |_params, pending: PendingSubscriptionSink, _state: Arc<()>, _| async move {
                 let sink = pending.accept().await?;
-                let state = CastState { casting: false, client: None, pending: Vec::new() };
+                let state = CastState { casting: false, client: None, pending: Vec::new(), paired: Vec::new() };
                 let raw = serde_json::value::to_raw_value(&state)?;
                 sink.send(SubscriptionMessage::from(raw)).await?;
                 Ok::<(), jsonrpsee::core::SubscriptionError>(())

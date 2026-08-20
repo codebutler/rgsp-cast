@@ -21,11 +21,24 @@ pub struct PendingEntry {
     pub address: Option<String>,
 }
 
+/// An already-paired client, keyed on its certificate fingerprint rather
+/// than a client id — see `moonshine_core::clients::PairedInfo`'s doc
+/// comment for why the id (`uniqueid`) cannot tell two paired machines
+/// apart. `name`/`address` are a label captured at pairing time, not a
+/// live lookup, so either can go stale.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PairedEntry {
+    pub fingerprint: String,
+    pub name: Option<String>,
+    pub address: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CastState {
     pub casting: bool,
     pub client: Option<String>,
     pub pending: Vec<PendingEntry>,
+    pub paired: Vec<PairedEntry>,
 }
 
 /// `paired` is the *pairing outcome*, not "the PIN was accepted for
@@ -34,6 +47,15 @@ pub struct CastState {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PinResult {
     pub paired: bool,
+}
+
+/// [`PinApiServer::unpair`]'s answer: whether the fingerprint was actually
+/// paired and is now removed. `false` (not an error) if it was already not
+/// paired — e.g. the UI's list was stale by a frame and the user unpaired
+/// something already gone, which is a no-op, not a failure.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct UnpairResult {
+    pub removed: bool,
 }
 
 /// How long [`PinApiServer::submit_pin`] waits for Moonlight to finish the
@@ -69,6 +91,13 @@ pub trait PinApi {
     // actually promises callers.
     #[method(name = "submit_pin", param_kind = map)]
     async fn submit_pin(&self, id: String, pin: String) -> RpcResult<PinResult>;
+
+    /// Remove a paired client by certificate fingerprint (see
+    /// [`PairedEntry`]). On this trait, not a separate one, purely to avoid
+    /// a second `RpcModule::merge` in [`ControlHandle::serve`] — pairing
+    /// and unpairing are otherwise unrelated.
+    #[method(name = "unpair")]
+    async fn unpair(&self, fingerprint: String) -> RpcResult<UnpairResult>;
 }
 
 /// Shared, cheap to clone. Owns the state the UI observes.
@@ -98,6 +127,7 @@ impl ControlHandle {
                 casting: false,
                 client: None,
                 pending: Vec::new(),
+                paired: Vec::new(),
             })),
             changed: Arc::new(Notify::new()),
             client_manager: Arc::new(OnceLock::new()),
@@ -125,6 +155,11 @@ impl ControlHandle {
 
     pub fn set_pending(&self, pending: Vec<PendingEntry>) {
         self.inner.lock().expect("control state poisoned").pending = pending;
+        self.changed.notify_waiters();
+    }
+
+    pub fn set_paired(&self, paired: Vec<PairedEntry>) {
+        self.inner.lock().expect("control state poisoned").paired = paired;
         self.changed.notify_waiters();
     }
 
@@ -262,6 +297,22 @@ impl PinApiServer for ControlHandle {
             Ok(PinResult { paired: true })
         } else {
             Err(ErrorObjectOwned::owned(-32001, "pairing did not complete; check the PIN", None::<()>))
+        }
+    }
+
+    /// Removes the fingerprint from the daemon's persisted paired-client
+    /// list. Does not itself push the updated `CastState.paired` list —
+    /// `ClientManager::unpair` fires `pending_changed`, which the paired
+    /// watcher in `main.rs` (the same one that already refreshes `pending`)
+    /// picks up and republishes from, so the socket subscription is the
+    /// live-update path, same as pairing completing.
+    async fn unpair(&self, fingerprint: String) -> RpcResult<UnpairResult> {
+        let Some(client_manager) = self.client_manager.get() else {
+            return Err(ErrorObjectOwned::owned(-32000, "pairing not available", None::<()>));
+        };
+        match client_manager.unpair(&fingerprint) {
+            Ok(removed) => Ok(UnpairResult { removed }),
+            Err(()) => Err(ErrorObjectOwned::owned(-32002, "failed to persist unpair", None::<()>)),
         }
     }
 }
