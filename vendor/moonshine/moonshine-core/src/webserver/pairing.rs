@@ -100,11 +100,11 @@ pub async fn handle_pair_request(
 async fn get_server_cert(
 	_request: Request<hyper::body::Incoming>,
 	mut params: HashMap<String, String>,
-	local_address: Option<SocketAddr>,
+	_local_address: Option<SocketAddr>,
 	peer_address: Option<SocketAddr>,
 	server_pem_str: &str,
 	client_manager: &ClientManager,
-	http_port: u16,
+	_http_port: u16,
 	shutdown: &ShutdownManager<ShutdownReason>,
 ) -> Response<Full<Bytes>> {
 	let client_cert = require_param!(params, "clientcert");
@@ -171,14 +171,6 @@ async fn get_server_cert(
 	// is actually received, since pairing then continues over further
 	// requests and only `check_client_pairing_secret` should remove it.
 	let guard = PendingClientGuard::new(client_manager.clone(), unique_id.clone());
-
-	// The desktop notification that offered to open the PIN page needed
-	// notify-rust and open; log the URL instead.
-	if let Some(local_address) = local_address {
-		let pin_address = SocketAddr::new(local_address.ip(), http_port);
-		let pin_url = format!("http://{pin_address}/pin?uniqueid={unique_id}");
-		tracing::info!("Waiting for pin to be sent at {pin_url}");
-	}
 
 	tokio::select! {
 		_ = pin_notifier.notified() => {

@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_shutdown::ShutdownManager;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::Full;
 use hyper::{
 	Method, Request, Response, StatusCode,
 	body::Bytes,
@@ -418,18 +418,6 @@ impl Webserver {
 					)
 					.await
 				},
-				(&Method::GET, "/pin") => {
-					if !self.webserver_config.enable_pairing {
-						return Ok(bad_request("Pairing is disabled.".to_string()));
-					}
-					self.pin(params)
-				},
-				(&Method::POST, "/submit-pin") => {
-					if !self.webserver_config.enable_pairing {
-						return Ok(bad_request("Pairing is disabled.".to_string()));
-					}
-					self.submit_pin(request).await
-				},
 				(&Method::GET, "/unpair") => self.unpair(params).await,
 				(method, uri) => {
 					tracing::warn!("Unhandled {method} request with URI '{uri}'");
@@ -598,77 +586,6 @@ impl Webserver {
 			.headers_mut()
 			.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/xml"));
 		response
-	}
-
-	fn pin(&self, params: HashMap<String, String>) -> Response<Full<Bytes>> {
-		let unique_id = params
-			.get("uniqueid")
-			.cloned()
-			.map(|id| {
-				id.chars()
-					.filter(|c| c.is_ascii_hexdigit())
-					.take(16)
-					.collect::<String>()
-			})
-			.filter(|id| !id.is_empty())
-			.unwrap_or_else(|| "0123456789ABCDEF".to_string());
-		let content = include_bytes!("../../../assets/pin.html");
-		let html = String::from_utf8_lossy(content);
-		let html = html.replace("{{UNIQUE_ID}}", &unique_id);
-		let mut response = Response::new(Full::new(Bytes::from(html)));
-		response.headers_mut().insert(
-			header::CONTENT_TYPE,
-			HeaderValue::from_static("text/html; charset=UTF-8"),
-		);
-
-		response
-	}
-
-	async fn submit_pin(&self, request: Request<hyper::body::Incoming>) -> Response<Full<Bytes>> {
-		// Enforce a hard 1 KB limit while reading the body to reject oversized requests early.
-		let body = match Limited::new(request.into_body(), 1024).collect().await {
-			Ok(body) => body.to_bytes(),
-			Err(e) => {
-				tracing::warn!("Failed to read request body: {e}");
-				return bad_request("Bad request.".to_string());
-			},
-		};
-
-		let params: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
-
-		let unique_id = match params.get("uniqueid") {
-			Some(unique_id) => unique_id,
-			None => {
-				tracing::warn!("Missing 'uniqueid' in PIN submission.");
-				return bad_request("Bad request.".to_string());
-			},
-		};
-
-		let pin = match params.get("pin") {
-			Some(pin) => pin,
-			None => {
-				tracing::warn!("Missing 'pin' in PIN submission.");
-				return bad_request("Bad request.".to_string());
-			},
-		};
-
-		let response = self.client_manager.register_pin(unique_id, pin);
-		match response {
-			Ok(()) => {
-				tracing::info!("PIN registered successfully.");
-				match Response::builder()
-					.status(StatusCode::OK)
-					.body(Full::new(Bytes::from("PIN accepted.")))
-				{
-					Ok(response) => response,
-					Err(e) => {
-						tracing::warn!("Failed to create response: {e}");
-						bad_request("Bad request.".to_string())
-					},
-				}
-			},
-			Err(()) => bad_request("Failed to register PIN.".to_string()),
-		}
 	}
 
 	async fn unpair(&self, _params: HashMap<String, String>) -> Response<Full<Bytes>> {
