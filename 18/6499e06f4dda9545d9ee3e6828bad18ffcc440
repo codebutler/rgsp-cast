@@ -1,0 +1,20 @@
+scripts/verify-pak.sh
+  s_630e93546bad55::t_89b25d9156050d 23-27,33-42
+  s_630e93546bad55::t_eba804fd8faec2 28-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "186499e06f4dda9545d9ee3e6828bad18ffcc440",
+  "prompts": {},
+  "sessions": {
+    "s_630e93546bad55": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5b8377dc-bc0f-474e-b555-c640aee7ad2e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
