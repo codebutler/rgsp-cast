@@ -86,6 +86,51 @@ for phase in boot pre-launch pre-sleep post-resume; do
     done
 done
 
+echo "== removing stale files dist/ no longer ships =="
+# A previous install can leave files behind that this one no longer copies
+# -- e.g. a dropped asset, or a renamed hook, which is worse than inert
+# clutter because the old name is still a *.sh a hook runner will still
+# execute. verify-pak.sh can't catch this either: its manifest is built
+# from dist/, so a file absent from dist/ is simply absent from the check,
+# not flagged.
+#
+# Scoped to exactly the two trees install-pak.sh populates from dist/ and
+# vendor-libs/: $DEST (which is how lib/h700 gets covered too, via
+# vendor-libs/ entries already folded into $MANIFEST above) and the four
+# hook phase directories under $HOOKS. Explicitly not $HOOKS itself (only
+# the phase subdirs this script writes to) and nothing under the run
+# directory (/tmp/rgsp by default, never under $DEST or $HOOKS) or user
+# data -- neither is ever populated by this script, so neither is touched.
+KEEP_LIST=$(mktemp)
+REMOTE_LIST=$(mktemp)
+trap 'rm -f "$MANIFEST" "$HOOKS_MANIFEST" "$KEEP_LIST" "$REMOTE_LIST"' EXIT
+
+prune_stale() {
+    device=$1
+    base=$2
+    manifest=$3
+
+    ssh "$device" "cd '$base' 2>/dev/null && find . -type f | sed 's|^\./||'" | sort -u > "$REMOTE_LIST" || true
+    [ -s "$REMOTE_LIST" ] || return 0
+
+    cut -f1 "$manifest" | sort -u > "$KEEP_LIST"
+    # -n: each rm runs inside a `while read` fed by the comm pipe above: an
+    # ssh that reads its own stdin here would instead drain the rest of
+    # that pipe, so redirect ssh's stdin from /dev/null.
+    comm -23 "$REMOTE_LIST" "$KEEP_LIST" | while read -r rel; do
+        [ -n "$rel" ] || continue
+        echo "removing stale: $base/$rel"
+        ssh -n "$device" "rm -f '$base/$rel'"
+    done
+}
+prune_stale "$DEVICE" "$DEST" "$MANIFEST"
+for phase in boot pre-launch pre-sleep post-resume; do
+    phase_manifest=$(mktemp)
+    awk -F'\t' -v p="$phase.d/" 'index($1, p) == 1 { print substr($1, length(p)+1) "\t" $2 }' "$HOOKS_MANIFEST" > "$phase_manifest"
+    prune_stale "$DEVICE" "$HOOKS/$phase.d" "$phase_manifest"
+    rm -f "$phase_manifest"
+done
+
 FAILED=0
 verify_manifest "$DEVICE" "$DEST" "$MANIFEST" || FAILED=1
 verify_manifest "$DEVICE" "$HOOKS" "$HOOKS_MANIFEST" || FAILED=1
