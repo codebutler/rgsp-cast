@@ -54,6 +54,7 @@ pub async fn handle_pair_request(
 	request: Request<hyper::body::Incoming>,
 	mut params: HashMap<String, String>,
 	local_address: Option<SocketAddr>,
+	peer_address: Option<SocketAddr>,
 	server_certs: &str, // Pass as string (PEM)
 	client_manager: &ClientManager,
 	http_port: u16,
@@ -66,6 +67,7 @@ pub async fn handle_pair_request(
 					request,
 					params,
 					local_address,
+					peer_address,
 					server_certs,
 					client_manager,
 					http_port,
@@ -97,6 +99,7 @@ async fn get_server_cert(
 	_request: Request<hyper::body::Incoming>,
 	mut params: HashMap<String, String>,
 	local_address: Option<SocketAddr>,
+	peer_address: Option<SocketAddr>,
 	server_pem_str: &str,
 	client_manager: &ClientManager,
 	http_port: u16,
@@ -147,7 +150,11 @@ async fn get_server_cert(
 		},
 	};
 
-	let pin_notifier = client_manager.add_pending(unique_id.clone(), client_pem, salt, device_name);
+	// Store only the peer's IP, not the ephemeral port: the port changes per
+	// connection and is noise to a human reading the pairing UI.
+	let peer_ip = peer_address.map(|addr| addr.ip());
+
+	let pin_notifier = client_manager.add_pending(unique_id.clone(), client_pem, salt, device_name, peer_ip);
 
 	// The desktop notification that offered to open the PIN page needed
 	// notify-rust and open; log the URL instead.

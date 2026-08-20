@@ -153,8 +153,10 @@ fn main() -> anyhow::Result<()> {
                     last_reconnect_attempt = None;
                 }
                 HomeAction::Pair(id) => {
-                    let name = state.pending.iter().find(|p| p.id == id).and_then(|p| p.name.clone());
-                    next_screen = Some(Screen::Pin(Pin::new(id, name)));
+                    let entry = state.pending.iter().find(|p| p.id == id);
+                    let name = entry.and_then(|p| p.name.clone());
+                    let address = entry.and_then(|p| p.address.clone());
+                    next_screen = Some(Screen::Pin(Pin::new(id, name, address)));
                 }
                 HomeAction::Exit => break,
             },

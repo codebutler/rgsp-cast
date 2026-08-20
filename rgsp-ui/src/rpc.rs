@@ -19,6 +19,7 @@ use std::time::Duration;
 pub struct PendingEntry {
     pub id: String,
     pub name: Option<String>,
+    pub address: Option<String>,
 }
 
 /// Mirrors `rgsp_host::control::CastState`.

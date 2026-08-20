@@ -313,7 +313,7 @@ fn pending_entries(client_manager: &ClientManager) -> Vec<PendingEntry> {
     client_manager
         .pending_clients()
         .into_iter()
-        .map(|p| PendingEntry { id: p.id, name: normalize_devicename(p.name) })
+        .map(|p| PendingEntry { id: p.id, name: normalize_devicename(p.name), address: p.address })
         .collect()
 }
 

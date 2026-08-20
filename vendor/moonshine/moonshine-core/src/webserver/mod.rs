@@ -157,11 +157,17 @@ impl Webserver {
 
 							tracing::debug!("HTTP server listening for connections on {http_address}");
 							loop {
-								let (connection, address) = listener
+								let (connection, peer_address) = listener
 									.accept()
 									.await
 									.map_err(|e| tracing::error!("Failed to accept connection: {e}"))?;
-								tracing::trace!("Accepted connection from {address}.");
+								tracing::trace!("Accepted connection from {peer_address}.");
+
+								// The peer's address (i.e. who is connecting), as opposed to
+								// `address` below, which is the *server's* local address on
+								// this connection. Unmap the same way so a dual-stack socket
+								// doesn't render an IPv4 peer as `::ffff:a.b.c.d`.
+								let peer_address = Some(unmap_v4_mapped(peer_address));
 
 								let address = connection.local_addr().ok().map(unmap_v4_mapped);
 								let mac_address = if let Some(address) = address {
@@ -185,6 +191,7 @@ impl Webserver {
 															server.serve(
 																request,
 																address,
+																peer_address,
 																mac_address.clone(),
 																false,
 																None,
@@ -243,11 +250,16 @@ impl Webserver {
 
 							tracing::debug!("HTTPS server listening for connections on {https_address}");
 							loop {
-								let (connection, address) = listener
+								let (connection, peer_address) = listener
 									.accept()
 									.await
 									.map_err(|e| tracing::error!("Failed to accept connection: {e}"))?;
-								tracing::trace!("Accepted TLS connection from {address}.");
+								tracing::trace!("Accepted TLS connection from {peer_address}.");
+
+								// See the HTTP accept loop above: `peer_address` is who is
+								// connecting, `address` below is the server's own local
+								// address on this connection.
+								let peer_address = Some(unmap_v4_mapped(peer_address));
 
 								let address = connection.local_addr().ok().map(unmap_v4_mapped);
 								let mac_address = if let Some(address) = address {
@@ -284,6 +296,7 @@ impl Webserver {
 															server.serve(
 																request,
 																address,
+																peer_address,
 																mac_address.clone(),
 																true,
 																peer_cert_fingerprint.clone(),
@@ -315,6 +328,7 @@ impl Webserver {
 		&self,
 		request: Request<hyper::body::Incoming>,
 		local_address: Option<SocketAddr>,
+		peer_address: Option<SocketAddr>,
 		mac_address: Option<String>,
 		https: bool,
 		peer_cert_fingerprint: Option<String>,
@@ -351,6 +365,7 @@ impl Webserver {
 						request,
 						params,
 						local_address,
+						peer_address,
 						&self.server_certs,
 						&self.client_manager,
 						self.webserver_config.port,
@@ -394,6 +409,7 @@ impl Webserver {
 						request,
 						params,
 						local_address,
+						peer_address,
 						&self.server_certs,
 						&self.client_manager,
 						self.webserver_config.port,

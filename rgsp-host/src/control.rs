@@ -18,6 +18,7 @@ use tokio::sync::Notify;
 pub struct PendingEntry {
     pub id: String,
     pub name: Option<String>,
+    pub address: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

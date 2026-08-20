@@ -20,14 +20,15 @@ pub enum PinAction {
 pub struct Pin {
     client_id: String,
     client_name: Option<String>,
+    client_address: Option<String>,
     digits: [u8; 4],
     cursor: usize,
     error: Option<String>,
 }
 
 impl Pin {
-    pub fn new(client_id: String, client_name: Option<String>) -> Pin {
-        Pin { client_id, client_name, digits: [0; 4], cursor: 0, error: None }
+    pub fn new(client_id: String, client_name: Option<String>, client_address: Option<String>) -> Pin {
+        Pin { client_id, client_name, client_address, digits: [0; 4], cursor: 0, error: None }
     }
 
     /// The client id this screen is pairing, for the caller to pass back to
@@ -37,10 +38,11 @@ impl Pin {
     }
 
     /// The label to show for the client being paired: its name if the
-    /// daemon reported one, otherwise the same truncated id fallback as the
-    /// home screen's pending list (see [`crate::screens::client_label`]).
+    /// daemon reported one, else its address, else the same truncated id
+    /// fallback as the home screen's pending list (see
+    /// [`crate::screens::client_label`]).
     pub fn label(&self) -> String {
-        crate::screens::client_label(self.client_name.as_deref(), &self.client_id)
+        crate::screens::client_label(self.client_name.as_deref(), self.client_address.as_deref(), &self.client_id)
     }
 
     /// Advance the cursor and/or the digit under it.
@@ -138,7 +140,7 @@ mod tests {
 
     #[test]
     fn left_and_right_move_the_cursor_without_wrapping() {
-        let mut p = Pin::new("AA".into(), None);
+        let mut p = Pin::new("AA".into(), None, None);
         assert_eq!(p.cursor(), 0);
         p.update(&left());
         assert_eq!(p.cursor(), 0, "cursor stops at the first digit");
@@ -148,7 +150,7 @@ mod tests {
 
     #[test]
     fn up_and_down_wrap_the_digit() {
-        let mut p = Pin::new("AA".into(), None);
+        let mut p = Pin::new("AA".into(), None, None);
         p.update(&down());
         assert_eq!(p.digits()[0], 9, "0 down wraps to 9");
         p.update(&up());
@@ -157,7 +159,7 @@ mod tests {
 
     #[test]
     fn a_submits_all_four_digits_in_order() {
-        let mut p = Pin::new("AA".into(), None);
+        let mut p = Pin::new("AA".into(), None, None);
         p.update(&up()); // 1
         p.update(&right());
         p.update(&up());
@@ -169,13 +171,13 @@ mod tests {
 
     #[test]
     fn b_goes_back() {
-        let mut p = Pin::new("AA".into(), None);
+        let mut p = Pin::new("AA".into(), None, None);
         assert_eq!(p.update(&b()), PinAction::Back);
     }
 
     #[test]
     fn cursor_does_not_overshoot_the_last_digit() {
-        let mut p = Pin::new("AA".into(), None);
+        let mut p = Pin::new("AA".into(), None, None);
         for _ in 0..10 {
             p.update(&right());
         }
@@ -184,7 +186,7 @@ mod tests {
 
     #[test]
     fn editing_clears_a_previously_set_error() {
-        let mut p = Pin::new("AA".into(), None);
+        let mut p = Pin::new("AA".into(), None, None);
         p.set_error("PIN rejected");
         p.update(&up());
         assert!(p.error.is_none());
@@ -192,19 +194,25 @@ mod tests {
 
     #[test]
     fn client_id_is_reported_back_for_submit_pin() {
-        let p = Pin::new("client-123".into(), Some("phone".into()));
+        let p = Pin::new("client-123".into(), Some("phone".into()), None);
         assert_eq!(p.client_id(), "client-123");
     }
 
     #[test]
     fn label_falls_back_to_a_truncated_id_without_a_name() {
-        let p = Pin::new("A1B2C3D4E5F60718".into(), None);
+        let p = Pin::new("A1B2C3D4E5F60718".into(), None, None);
         assert_eq!(p.label(), "A1B2C3D4");
     }
 
     #[test]
     fn label_prefers_the_name_when_present() {
-        let p = Pin::new("A1B2C3D4E5F60718".into(), Some("phone".into()));
+        let p = Pin::new("A1B2C3D4E5F60718".into(), Some("phone".into()), None);
         assert_eq!(p.label(), "phone");
+    }
+
+    #[test]
+    fn label_falls_back_to_the_address_without_a_name() {
+        let p = Pin::new("A1B2C3D4E5F60718".into(), None, Some("192.168.180.44".into()));
+        assert_eq!(p.label(), "192.168.180.44");
     }
 }

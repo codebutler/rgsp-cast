@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -28,6 +29,14 @@ pub(crate) struct PendingClient {
 	/// Human-readable name Moonlight sent as `devicename`, when it sent one.
 	pub(crate) name: Option<String>,
 
+	/// IP address of the peer that opened this pairing connection. Every
+	/// Moonlight client hardcodes both `devicename` and, absent
+	/// `m_UseTrueUid`, `uniqueid` too, so on a home LAN this is often the
+	/// only thing that actually distinguishes one pairing client from
+	/// another. The port is deliberately not kept: it is ephemeral per
+	/// connection and would just be noise in the on-device UI.
+	pub(crate) address: Option<IpAddr>,
+
 	/// Client certificate used for secure communication (PEM format).
 	pub(crate) pem: String,
 
@@ -55,6 +64,11 @@ pub(crate) struct PendingClient {
 pub struct PendingInfo {
 	pub id: String,
 	pub name: Option<String>,
+
+	/// IP address of the peer that opened this pairing connection, formatted
+	/// as a plain string (no port). `None` if the peer address could not be
+	/// determined.
+	pub address: Option<String>,
 }
 
 /// Manages client pairing state and operations.
@@ -93,7 +107,11 @@ impl ClientManager {
 		};
 		inner
 			.values()
-			.map(|c| PendingInfo { id: c.id.clone(), name: c.name.clone() })
+			.map(|c| PendingInfo {
+				id: c.id.clone(),
+				name: c.name.clone(),
+				address: c.address.map(|addr| addr.to_string()),
+			})
 			.collect()
 	}
 
@@ -105,7 +123,14 @@ impl ClientManager {
 
 	/// Insert a pending client, signal the change, and return the `Notify`
 	/// that fires once a PIN has been received for it.
-	pub(crate) fn add_pending(&self, id: String, pem: String, salt: [u8; 16], name: Option<String>) -> Arc<Notify> {
+	pub(crate) fn add_pending(
+		&self,
+		id: String,
+		pem: String,
+		salt: [u8; 16],
+		name: Option<String>,
+		address: Option<IpAddr>,
+	) -> Arc<Notify> {
 		let pin_notify = Arc::new(Notify::new());
 		if let Ok(mut inner) = self.pending_clients.write() {
 			inner.insert(
@@ -113,6 +138,7 @@ impl ClientManager {
 				PendingClient {
 					id,
 					name,
+					address,
 					pem,
 					salt,
 					pin_notify: pin_notify.clone(),
@@ -427,7 +453,7 @@ mod pending_tests {
 	#[test]
 	fn pending_clients_lists_id_and_name() {
 		let m = manager();
-		m.add_pending("AABB".into(), "pem".into(), salt(), Some("eric-mbp".into()));
+		m.add_pending("AABB".into(), "pem".into(), salt(), Some("eric-mbp".into()), None);
 		let listed = m.pending_clients();
 		assert_eq!(listed.len(), 1);
 		assert_eq!(listed[0].id, "AABB");
@@ -437,8 +463,23 @@ mod pending_tests {
 	#[test]
 	fn pending_clients_tolerates_a_missing_name() {
 		let m = manager();
-		m.add_pending("CCDD".into(), "pem".into(), salt(), None);
+		m.add_pending("CCDD".into(), "pem".into(), salt(), None, None);
 		assert_eq!(m.pending_clients()[0].name, None);
+	}
+
+	#[test]
+	fn pending_clients_lists_the_peer_address_as_a_plain_string() {
+		let m = manager();
+		let addr: IpAddr = "192.168.180.44".parse().unwrap();
+		m.add_pending("1122".into(), "pem".into(), salt(), None, Some(addr));
+		assert_eq!(m.pending_clients()[0].address.as_deref(), Some("192.168.180.44"));
+	}
+
+	#[test]
+	fn pending_clients_tolerates_a_missing_address() {
+		let m = manager();
+		m.add_pending("3344".into(), "pem".into(), salt(), None, None);
+		assert_eq!(m.pending_clients()[0].address, None);
 	}
 
 	#[tokio::test]
@@ -447,7 +488,7 @@ mod pending_tests {
 		let notify = m.pending_changed();
 		let waiter = tokio::spawn(async move { notify.notified().await });
 		tokio::task::yield_now().await;
-		m.add_pending("EEFF".into(), "pem".into(), salt(), None);
+		m.add_pending("EEFF".into(), "pem".into(), salt(), None, None);
 		tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
 			.await
 			.expect("pending_changed did not fire within 1s")
@@ -469,7 +510,7 @@ mod pending_tests {
 		let pin = "1234";
 		let salt_bytes = salt();
 
-		m.add_pending(id.into(), client_pem.clone(), salt_bytes, Some("test-client".into()));
+		m.add_pending(id.into(), client_pem.clone(), salt_bytes, Some("test-client".into()), None);
 		assert_eq!(m.pending_clients().len(), 1, "sanity: client is pending before pairing completes");
 
 		m.register_pin(id, pin).expect("register pin");

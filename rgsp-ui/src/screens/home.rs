@@ -118,7 +118,7 @@ impl Home {
         ui.row("Service", Some(&status), 0, self.selected == 0);
 
         for (i, entry) in state.pending.iter().enumerate() {
-            let label = crate::screens::client_label(entry.name.as_deref(), &entry.id);
+            let label = crate::screens::client_label(entry.name.as_deref(), entry.address.as_deref(), &entry.id);
             ui.row(&label, Some(">"), (i + 1) as i32, self.selected == i + 1);
         }
 
@@ -155,8 +155,8 @@ mod tests {
             casting: true,
             client: None,
             pending: vec![
-                PendingEntry { id: "AA".into(), name: Some("eric-mbp".into()) },
-                PendingEntry { id: "BB".into(), name: None },
+                PendingEntry { id: "AA".into(), name: Some("eric-mbp".into()), address: None },
+                PendingEntry { id: "BB".into(), name: None, address: None },
             ],
         };
         let mut home = Home::new();
@@ -177,8 +177,8 @@ mod tests {
             casting: true,
             client: None,
             pending: vec![
-                PendingEntry { id: "AA".into(), name: None },
-                PendingEntry { id: "BB".into(), name: None },
+                PendingEntry { id: "AA".into(), name: None, address: None },
+                PendingEntry { id: "BB".into(), name: None, address: None },
             ],
         };
         let none = CastState { casting: true, client: None, pending: vec![] };
@@ -202,7 +202,7 @@ mod tests {
         let state = CastState {
             casting: true,
             client: None,
-            pending: vec![PendingEntry { id: "AA".into(), name: None }],
+            pending: vec![PendingEntry { id: "AA".into(), name: None, address: None }],
         };
         let mut home = Home::new();
         // service row selected, connected: A stops the daemon
