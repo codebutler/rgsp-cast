@@ -105,12 +105,30 @@ KEEP_LIST=$(mktemp)
 REMOTE_LIST=$(mktemp)
 trap 'rm -f "$MANIFEST" "$HOOKS_MANIFEST" "$KEEP_LIST" "$REMOTE_LIST"' EXIT
 
+# prune_stale DEVICE BASE MANIFEST [NAME_GLOB]
+#
+# Removes files under BASE that the manifest does not list. NAME_GLOB, when
+# given, restricts what is even considered for removal.
+#
+# That restriction is not optional for the hook directories.
+# `.userdata/h700/.hooks/<phase>.d` is NextUI's SHARED hook system -- any pak
+# may install into it -- so pruning everything there that is not in *Cast's*
+# manifest would delete other paks' hooks. Ours are all named `*rgsp*`, so
+# that is the only thing we may ever delete there. The pak's own directory
+# has no such constraint: it belongs to us entirely.
 prune_stale() {
     device=$1
     base=$2
     manifest=$3
+    name_glob=${4:-}
 
-    ssh "$device" "cd '$base' 2>/dev/null && find . -type f | sed 's|^\./||'" | sort -u > "$REMOTE_LIST" || true
+    if [ -n "$name_glob" ]; then
+        find_expr="find . -type f -name '$name_glob'"
+    else
+        find_expr="find . -type f"
+    fi
+
+    ssh "$device" "cd '$base' 2>/dev/null && $find_expr | sed 's|^\./||'" | sort -u > "$REMOTE_LIST" || true
     [ -s "$REMOTE_LIST" ] || return 0
 
     cut -f1 "$manifest" | sort -u > "$KEEP_LIST"
@@ -127,7 +145,8 @@ prune_stale "$DEVICE" "$DEST" "$MANIFEST"
 for phase in boot pre-launch pre-sleep post-resume; do
     phase_manifest=$(mktemp)
     awk -F'\t' -v p="$phase.d/" 'index($1, p) == 1 { print substr($1, length(p)+1) "\t" $2 }' "$HOOKS_MANIFEST" > "$phase_manifest"
-    prune_stale "$DEVICE" "$HOOKS/$phase.d" "$phase_manifest"
+    # `*rgsp*` only: this directory is shared with every other pak.
+    prune_stale "$DEVICE" "$HOOKS/$phase.d" "$phase_manifest" '*rgsp*'
     rm -f "$phase_manifest"
 done
 
