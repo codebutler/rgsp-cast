@@ -1,0 +1,19 @@
+rgsp-ui/src/main.rs
+  s_630e93546bad55::t_b75040a59c2c45 214-220
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "441dbbead459508dcf6cbe063a6d419dbf9b0b60",
+  "prompts": {},
+  "sessions": {
+    "s_630e93546bad55": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5b8377dc-bc0f-474e-b555-c640aee7ad2e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
