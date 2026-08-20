@@ -508,6 +508,14 @@ impl Ui {
     /// (`workspace/common/api.c`'s `hints[2]`), so extra pairs are silently
     /// ignored rather than overflowing anything.
     pub fn hints(&mut self, hints: &[(&str, &str)]) {
+        // Nothing to hint means draw nothing. `GFX_blitButtonGroup` paints
+        // its pill background before it lays out any buttons, so handing it
+        // an empty list leaves an empty box in the corner -- visible on the
+        // "Pairing..." screen, which deliberately offers no buttons because
+        // the frame loop is blocked and could not act on one.
+        if hints.is_empty() {
+            return;
+        }
         let mut owned = Vec::with_capacity(hints.len() * 2);
         for (button, label) in hints {
             let (Ok(button), Ok(label)) = (CString::new(*button), CString::new(*label)) else {
