@@ -15,7 +15,7 @@
 //! test below, which relies on the short stop timeout actually elapsing.
 
 use rgsp_ui::service::Service;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -35,12 +35,38 @@ fn temp_dirs(name: &str) -> (PathBuf, PathBuf) {
 }
 
 /// Writes an executable `rgsp-host` shell script into `pak_dir`.
+///
+/// Deliberately does *not* use `std::fs::write` in this process: `fork()`
+/// copies the whole fd table into every child, and `O_CLOEXEC` only takes
+/// effect at `exec`, not at `fork`. Under parallel `cargo test`, a write fd
+/// this process holds on the stub — even for the few instructions between
+/// `File::create` and `Drop` — can get copied into a *sibling* test's
+/// `Command::spawn` fork() child on another thread mid-race, and that
+/// child holds it open (with intent to `exec` something else entirely)
+/// until it execs or exits. If this stub gets exec'd in that window, the
+/// kernel sees a nonzero `i_writecount` on its inode and this test fails
+/// with ETXTBSY, even though the path is unique to this test and nothing
+/// *in this test* still has it open. Writing through a short-lived child
+/// process instead confines the write fd to that child's own fd table,
+/// which no sibling's fork() ever copies.
 fn write_stub(pak_dir: &Path, script: &str) {
     let path = pak_dir.join("rgsp-host");
-    std::fs::write(&path, script).expect("write stub");
-    let mut perms = std::fs::metadata(&path).expect("stat stub").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod stub");
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(r#"cat > "$1" && chmod 755 "$1""#)
+        .arg("sh") // becomes $0 inside the -c script
+        .arg(&path) // $1
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn stub writer");
+    child
+        .stdin
+        .take()
+        .expect("stub writer stdin")
+        .write_all(script.as_bytes())
+        .expect("write stub script to writer's stdin");
+    let status = child.wait().expect("wait for stub writer");
+    assert!(status.success(), "writing stub {} failed: {status}", path.display());
 }
 
 /// Reads the pid out of `run_dir/daemon.pid`, retrying briefly since the
