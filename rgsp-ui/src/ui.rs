@@ -31,14 +31,22 @@ const COLOR_BLACK: SDL_Color = SDL_Color { r: 0x00, g: 0x00, b: 0x00, a: 0 };
 /// `Ui` that exists.
 const PADDING: i32 = 10;
 
-/// Gap between adjacent PIN digit boxes, unscaled. Ours: the PIN entry is
-/// not a stock NextUI widget, so there is no C constant to mirror.
-const PIN_GAP: i32 = 8;
+/// NextUI clock.c's digit-atlas cell size, unscaled (`clock.c:31-32`). Ours:
+/// the PIN entry is not a stock NextUI widget, but the owner asked for the
+/// same number-entry UI as clock's date/time fields, and this is the cell
+/// every digit there is centred and monospaced within.
+const DIGIT_WIDTH: i32 = 10;
+const DIGIT_HEIGHT: i32 = 16;
 
-/// Which of the six navigation/action buttons were pressed *this frame*.
-///
-/// Decoded from `PAD_justPressed`, not `PAD_isPressed`: a mask built from
-/// `isPressed` would make menu navigation repeat every frame a key is held.
+/// Vertical gap from the digit row down to its cursor underline, unscaled
+/// (`clock.c:303`: `y += SCALE1(19);`, applied after the digit row's own y).
+const CURSOR_GAP: i32 = 19;
+
+/// Which of the six navigation/action buttons fired *this frame*: `up`,
+/// `down`, `left`, `right` from `PAD_justRepeated`, `a`/`b` from
+/// `PAD_justPressed` — see [`Ui::poll`] for why they differ. Neither is
+/// `PAD_isPressed`: a mask built from `isPressed` would fire every single
+/// frame a key is held, not once per press (or once per repeat interval).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Buttons {
     pub up: bool,
@@ -153,20 +161,28 @@ impl Ui {
     }
 
     /// Buttons pressed since the last call.
+    ///
+    /// Direction and action read differently on purpose, matching clock.c's
+    /// own number-entry loop (`clock.c:150,177,205,210` vs `:203,209`): the
+    /// directions use `PAD_justRepeated` so holding one auto-repeats — the
+    /// feel a user already knows from clock's date/time fields — while A/B
+    /// stay on `PAD_justPressed`, since they are one-shot actions where
+    /// repeating on a held button would be wrong (e.g. re-submitting a PIN
+    /// every few frames while A is held).
     pub fn poll(&mut self) -> Buttons {
         // SAFETY: input was initialized in `new` and stays valid until Drop.
         unsafe {
             sys::PLAT_pollInput();
         }
         let mut mask = 0i32;
-        for btn in [
-            sys::BTN_DPAD_UP,
-            sys::BTN_DPAD_DOWN,
-            sys::BTN_DPAD_LEFT,
-            sys::BTN_DPAD_RIGHT,
-            sys::BTN_A,
-            sys::BTN_B,
-        ] {
+        for btn in [sys::BTN_DPAD_UP, sys::BTN_DPAD_DOWN, sys::BTN_DPAD_LEFT, sys::BTN_DPAD_RIGHT] {
+            // SAFETY: PLAT_pollInput was just called; btn is a real BTN_*
+            // bit, which is what PAD_justRepeated expects.
+            if unsafe { sys::PAD_justRepeated(btn as i32) } != 0 {
+                mask |= btn as i32;
+            }
+        }
+        for btn in [sys::BTN_A, sys::BTN_B] {
             // SAFETY: PLAT_pollInput was just called; btn is a real BTN_*
             // bit, which is what PAD_justPressed expects.
             if unsafe { sys::PAD_justPressed(btn as i32) } != 0 {
@@ -199,8 +215,11 @@ impl Ui {
     }
 
     /// The font's line height, in pixels. Used to centre text against a
-    /// fixed band: it is constant per font, unlike a rendered surface's
-    /// height, so every row's baseline lines up whether or not a particular
+    /// fixed band the way NextUI centres its own elements —
+    /// `(container - element) / 2`, e.g. `ay = oy + (SCALE1(PILL_SIZE) -
+    /// asset_rect.h) / 2` (`api.c:2253`) — except the "element" here is
+    /// `TTF_FontHeight`, not a rendered surface's height: it is constant per
+    /// font, so every row's baseline lines up whether or not a particular
     /// string happens to contain descenders.
     fn text_height(&self) -> i32 {
         // SAFETY: font.large is populated by GFX_init before any Ui exists.
@@ -227,47 +246,69 @@ impl Ui {
 
         let color = if selected { COLOR_BLACK } else { COLOR_WHITE };
         let text_y = y + (pill_h - self.text_height()) / 2;
-        self.blit_text(label, pad * 2, text_y, color);
 
-        if let Some(value) = value {
-            // Right-align by rendering once to measure, then again in
-            // place: TTF_RenderUTF8_Blended is the only width source we
-            // have, and every rendered surface must be freed in the frame
-            // it was created.
-            let width = self.text_width(value);
-            let x = self.w - pad * 2 - width;
+        // Compute the value's placement (if any) before the label, so the
+        // label can be truncated to the space actually left for it — a row
+        // label is caller-supplied text (a device name, a peer address)
+        // with no length guarantee, and NextUI's own row drawing never
+        // lets a label run into whatever sits to its right.
+        let value_x = value.map(|v| self.w - pad * 2 - self.text_width(v));
+        let label_max_width = match value_x {
+            Some(x) => x - pad - pad * 2,
+            None => self.w - pad * 2 - pad * 2,
+        };
+        let label = self.truncate(label, label_max_width);
+        self.blit_text(&label, pad * 2, text_y, color);
+
+        if let (Some(value), Some(x)) = (value, value_x) {
             self.blit_text(value, x, text_y, color);
         }
     }
 
-    /// Draw a 4-digit PIN entry, digit boxes with the entry cursor
-    /// highlighted.
+    /// Draw a 4-digit PIN entry, matching NextUI's clock.c number-entry UI:
+    /// monospaced digit cells with no boxes behind them, and the selected
+    /// digit marked by an underline beneath it (`ASSET_UNDERLINE`), not a
+    /// filled pill behind it.
     pub fn pin(&mut self, digits: &[u8; 4], cursor: usize) {
-        let box_size = sys::scale1(sys::PILL_SIZE as i32);
-        let gap = sys::scale1(PIN_GAP);
-        let total_w = 4 * box_size + 3 * gap;
-        let x0 = (self.w - total_w) / 2;
-        let y = (self.h - box_size) / 2;
+        let cell_w = sys::scale1(DIGIT_WIDTH);
+
+        // clock.c:265's `y = SCALE1(((FIXED_HEIGHT/FIXED_SCALE - PILL_SIZE -
+        // DIGIT_HEIGHT)/2))` can't be ported literally: FIXED_HEIGHT is a
+        // runtime expression on h700 (see PADDING above) that bindgen
+        // cannot emit. `new()` already proved self.h == FIXED_HEIGHT for
+        // every `Ui` that exists, so `scale1(FIXED_HEIGHT/FIXED_SCALE) ==
+        // self.h` exactly, and scale1 is linear — distributing it over the
+        // subtraction gives the identical y without ever naming
+        // FIXED_HEIGHT.
+        let y = (self.h - sys::scale1(sys::PILL_SIZE as i32) - sys::scale1(DIGIT_HEIGHT)) / 2;
+        let x0 = (self.w - digits.len() as i32 * cell_w) / 2;
 
         for (i, &digit) in digits.iter().enumerate() {
-            let x = x0 + i as i32 * (box_size + gap);
-            let is_cursor = i == cursor;
-            let asset = if is_cursor { sys::ASSET_WHITE_PILL } else { sys::ASSET_DARK_GRAY_PILL };
-            let mut rect = SDL_Rect { x, y, w: box_size, h: box_size };
-            // SAFETY: screen is valid; rect is within the panel because
-            // total_w/x0/y are derived from self.w/self.h.
-            unsafe {
-                sys::GFX_blitPill(asset as i32, self.screen, &mut rect);
+            if digit > 9 {
+                continue; // not yet entered; leave the cell blank
             }
+            let cell_x = x0 + i as i32 * cell_w;
+            let text = digit.to_string();
+            // Digits stay white and unhighlighted regardless of the
+            // cursor — the underline drawn below is the only cursor
+            // affordance, matching clock.c.
+            let width = self.text_width(&text);
+            let tx = cell_x + (cell_w - width) / 2;
+            let ty = y + (sys::scale1(DIGIT_HEIGHT) - self.text_height()) / 2;
+            self.blit_text(&text, tx, ty, COLOR_WHITE);
+        }
 
-            if digit <= 9 {
-                let text = digit.to_string();
-                let color = if is_cursor { COLOR_BLACK } else { COLOR_WHITE };
-                let width = self.text_width(&text);
-                let tx = x + (box_size - width) / 2;
-                let ty = y + (box_size - self.text_height()) / 2;
-                self.blit_text(&text, tx, ty, color);
-            }
+        let bar_x = x0 + cursor as i32 * cell_w;
+        let bar_y = y + sys::scale1(CURSOR_GAP);
+        let mut rect = SDL_Rect { x: bar_x, y: bar_y, w: cell_w, h: 0 };
+        // SAFETY: screen is valid; rect is within the panel because x0/y
+        // are derived from self.w/self.h and cursor < digits.len()
+        // (Pin::update never advances it past the last digit). `h: 0`
+        // tells GFX_blitPillColor to fall back to ASSET_UNDERLINE's own
+        // natural height (api.c:1868), same as clock.c's blitBar, which
+        // never sets one either.
+        unsafe {
+            sys::GFX_blitPill(sys::ASSET_UNDERLINE as i32, self.screen, &mut rect);
         }
     }
 
@@ -320,27 +361,53 @@ impl Ui {
         }
     }
 
-    /// The width `text` would render at, in pixels, without leaving the
-    /// measuring surface behind.
+    /// The width `text` would render at, in pixels — NextUI's own
+    /// `GFX_getTextWidth` (`api.c:979`), which measures with `TTF_SizeUTF8`
+    /// rather than rendering a throwaway surface the way this used to.
     fn text_width(&self, text: &str) -> i32 {
         let Ok(cstr) = CString::new(text) else {
             return 0;
         };
+        let mut out = Self::scratch_buffer(&cstr);
         // SAFETY: font.large is populated by GFX_init before any Ui exists;
-        // cstr is a valid NUL-terminated C string for the call's duration.
-        // The rendered surface is freed immediately below — this call exists
-        // only to measure, not to draw.
-        let rendered =
-            unsafe { sys::TTF_RenderUTF8_Blended(sys::font.large, cstr.as_ptr(), COLOR_WHITE) };
-        if rendered.is_null() {
-            return 0;
-        }
-        // SAFETY: rendered was just checked non-null and is not used again.
+        // cstr is a valid NUL-terminated C string for the call's duration;
+        // `out` is sized by `scratch_buffer` to hold GFX_getTextWidth's own
+        // `strcpy(out_name, in_name)` (api.c:982), which runs unconditionally
+        // before it measures — `max_width` is accepted but never read by the
+        // function body, so passing `i32::MAX` here is inert, not a real
+        // limit.
+        unsafe { sys::GFX_getTextWidth(sys::font.large, cstr.as_ptr(), out.as_mut_ptr().cast(), i32::MAX, 0) }
+    }
+
+    /// `text` shortened to fit within `max_width` pixels, trailing with
+    /// "..." if it does not — NextUI's own `GFX_truncateText` (`api.c:953`).
+    fn truncate(&self, text: &str, max_width: i32) -> String {
+        let Ok(cstr) = CString::new(text) else {
+            return text.to_string();
+        };
+        let mut out = Self::scratch_buffer(&cstr);
+        // SAFETY: font.large is populated by GFX_init before any Ui exists;
+        // cstr is a valid NUL-terminated C string for the call's duration;
+        // `out` is sized by `scratch_buffer` to hold the initial full-string
+        // strcpy GFX_truncateText performs before it starts shortening
+        // (api.c:956). Each shortening pass afterward only ever splices
+        // "...\0" starting 4 bytes before the current end (api.c:963), which
+        // stays within a buffer sized for the (longer) original string.
         unsafe {
-            let w = (*rendered).w;
-            sdl2_sys::SDL_FreeSurface(rendered);
-            w
+            sys::GFX_truncateText(sys::font.large, cstr.as_ptr(), out.as_mut_ptr().cast(), max_width, 0);
         }
+        let end = out.iter().position(|&b| b == 0).unwrap_or(out.len());
+        String::from_utf8_lossy(&out[..end]).into_owned()
+    }
+
+    /// A zeroed buffer sized for NextUI's `out_name` contract: several of
+    /// its text helpers (`GFX_getTextWidth`, `GFX_truncateText`) start with
+    /// an unconditional `strcpy(out_name, in_name)`, so the caller's buffer
+    /// must hold the *entire* input up front — sizing it to whatever the
+    /// call's own result turns out to be would let that first copy overflow
+    /// it.
+    fn scratch_buffer(cstr: &CString) -> Vec<u8> {
+        vec![0u8; cstr.as_bytes().len() + 1]
     }
 }
 

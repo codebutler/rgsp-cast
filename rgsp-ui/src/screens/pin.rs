@@ -49,7 +49,7 @@ impl Pin {
     ///
     /// Left/right move the cursor but do **not** wrap: overshooting past the
     /// first or last digit would silently land back on a different digit,
-    /// which is easy to lose track of on a 4-box entry with no scrollback.
+    /// which is easy to lose track of on a 4-digit entry with no scrollback.
     /// Up/down wrap the digit itself — 9 up is 0, 0 down is 9 — since there
     /// is no "past the end" for a single decimal digit the way there is for
     /// the cursor.
@@ -90,7 +90,7 @@ impl Pin {
         self.cursor
     }
 
-    /// Records a message to show under the digit boxes, e.g. after
+    /// Records a message to show under the digit row, e.g. after
     /// `Control::submit_pin` reports [`crate::rpc::PinOutcome::Rejected`] or
     /// [`crate::rpc::PinOutcome::NotReady`]. Cleared automatically the next
     /// time the user edits a digit or the cursor (see [`Pin::update`]), so a
