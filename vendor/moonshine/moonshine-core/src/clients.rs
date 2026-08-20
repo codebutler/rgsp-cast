@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
+use std::time::Instant;
 
 use aes::Aes128;
 use aes::cipher::Array;
@@ -57,7 +59,26 @@ pub(crate) struct PendingClient {
 
 	/// Cryptographic hash.
 	pub(crate) client_hash: Option<Vec<u8>>,
+
+	/// When this client was registered as pending. Used to expire entries
+	/// that have sat waiting for a PIN longer than [`PENDING_CLIENT_TTL`].
+	pub(crate) created_at: Instant,
 }
+
+/// How long a client may sit in the pending-pairing set before it is expired
+/// as a backstop.
+///
+/// The normal removal paths are: pairing completes successfully, or the
+/// pairing HTTP connection is dropped mid-request and [`PendingClientGuard`]
+/// cleans up immediately. This TTL only matters when neither happens — e.g.
+/// the handheld's WiFi drops, the phone/PC sleeps, or a NAT keeps the TCP
+/// socket alive without the peer actually being there to finish pairing.
+///
+/// Pairing is a human-paced action: someone has to notice the request, pick
+/// up the handheld, wake it, navigate to the Cast pairing screen, and type a
+/// 4-digit PIN. Anything under a minute risks cutting off a real attempt, so
+/// this is deliberately generous.
+const PENDING_CLIENT_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// A client waiting for a PIN, as shown by the on-device UI.
 #[derive(Clone, Debug)]
@@ -100,7 +121,16 @@ impl ClientManager {
 	}
 
 	/// Clients waiting for a PIN. The on-device UI lists these.
+	///
+	/// Opportunistically sweeps expired entries first (see
+	/// [`PENDING_CLIENT_TTL`]) so a client that vanished without dropping its
+	/// TCP connection doesn't linger forever just because nothing else
+	/// touched the pending set.
 	pub fn pending_clients(&self) -> Vec<PendingInfo> {
+		if self.expire_stale_pending() {
+			self.pending_changed.notify_waiters();
+		}
+
 		let Ok(inner) = self.pending_clients.read() else {
 			tracing::error!("RwLock poisoned reading pending clients");
 			return Vec::new();
@@ -113,6 +143,30 @@ impl ClientManager {
 				address: c.address.map(|addr| addr.to_string()),
 			})
 			.collect()
+	}
+
+	/// Remove pending clients that have waited longer than
+	/// [`PENDING_CLIENT_TTL`]. Returns `true` if anything was removed.
+	fn expire_stale_pending(&self) -> bool {
+		let Ok(mut inner) = self.pending_clients.write() else {
+			tracing::error!("RwLock poisoned expiring pending clients");
+			return false;
+		};
+		let before = inner.len();
+		inner.retain(|_, client| client.created_at.elapsed() < PENDING_CLIENT_TTL);
+		inner.len() != before
+	}
+
+	/// Remove a pending client by id, e.g. because its pairing request was
+	/// abandoned. Returns `true` if it was present. Does not signal
+	/// `pending_changed` itself; callers that care (like
+	/// [`PendingClientGuard`]) do so explicitly.
+	fn remove_pending(&self, id: &str) -> bool {
+		let Ok(mut inner) = self.pending_clients.write() else {
+			tracing::error!("RwLock poisoned removing pending client");
+			return false;
+		};
+		inner.remove(id).is_some()
 	}
 
 	/// Fires whenever the pending set changes, so a subscriber can push a
@@ -146,6 +200,7 @@ impl ClientManager {
 					server_secret: None,
 					server_challenge: None,
 					client_hash: None,
+					created_at: Instant::now(),
 				},
 			);
 		} else {
@@ -299,6 +354,53 @@ impl ClientManager {
 		drop(inner);
 		self.pending_changed.notify_waiters();
 		Ok(())
+	}
+}
+
+/// Removes a pending client on drop, unless [`disarm`](Self::disarm) is
+/// called first.
+///
+/// This guards the live-request `getservercert` phase of pairing
+/// (`handle_pair_request` in `webserver/pairing.rs`), which parks inside the
+/// HTTP handler awaiting a PIN for as long as it takes the user to walk over
+/// and type one in. If Moonlight is quit, or the connection otherwise drops,
+/// hyper cancels that handler future — which drops this guard along with it,
+/// removing the now-orphaned pending entry and firing `pending_changed` so
+/// the on-device UI updates immediately, without waiting on
+/// [`PENDING_CLIENT_TTL`].
+///
+/// On the success path (a PIN was received), call `disarm()`: pairing
+/// continues over further HTTP requests, and the entry must stay pending
+/// until `check_client_pairing_secret` removes it for real.
+pub(crate) struct PendingClientGuard {
+	id: String,
+	client_manager: ClientManager,
+	armed: bool,
+}
+
+impl PendingClientGuard {
+	pub(crate) fn new(client_manager: ClientManager, id: String) -> Self {
+		Self {
+			id,
+			client_manager,
+			armed: true,
+		}
+	}
+
+	/// Prevent this guard's `Drop` from removing the pending client.
+	pub(crate) fn disarm(mut self) {
+		self.armed = false;
+	}
+}
+
+impl Drop for PendingClientGuard {
+	fn drop(&mut self) {
+		if !self.armed {
+			return;
+		}
+		if self.client_manager.remove_pending(&self.id) {
+			self.client_manager.pending_changed.notify_waiters();
+		}
 	}
 }
 
@@ -559,5 +661,88 @@ mod pending_tests {
 			m.pending_clients().is_empty(),
 			"a client that finished pairing must not stay listed as pending"
 		);
+	}
+
+	/// Simulates the `getservercert` handler being cancelled mid-await, e.g.
+	/// because Moonlight was quit and hyper dropped the request future. The
+	/// guard's `Drop` should remove the pending entry right away and signal
+	/// the change, without anyone having to wait for the TTL.
+	#[tokio::test]
+	async fn an_abandoned_pairing_removes_the_client_and_signals() {
+		let m = manager();
+		m.add_pending("ABAB".into(), "pem".into(), salt(), None, None);
+		assert_eq!(m.pending_clients().len(), 1, "sanity: client is pending");
+
+		let notify = m.pending_changed();
+		let waiter = tokio::spawn(async move { notify.notified().await });
+		tokio::task::yield_now().await;
+
+		let guard = PendingClientGuard::new(m.clone(), "ABAB".into());
+		drop(guard); // never disarmed: stands in for a cancelled handler future
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+			.await
+			.expect("pending_changed did not fire within 1s")
+			.unwrap();
+
+		assert!(m.pending_clients().is_empty(), "abandoned pairing must not stay listed as pending");
+	}
+
+	/// The success path (a PIN arrived) disarms the guard, so its `Drop`
+	/// must not remove or re-signal a client that pairing completion already
+	/// removed — that would fire `pending_changed` twice for one pairing.
+	#[tokio::test]
+	async fn a_disarmed_guard_does_not_remove_or_signal() {
+		let m = manager();
+		m.add_pending("DEAD".into(), "pem".into(), salt(), None, None);
+
+		let guard = PendingClientGuard::new(m.clone(), "DEAD".into());
+		guard.disarm();
+
+		// Stand in for `check_client_pairing_secret` being the sole remover.
+		assert!(m.remove_pending("DEAD"), "sanity: the client was still pending");
+
+		let notify = m.pending_changed();
+		let waiter = tokio::spawn(async move {
+			tokio::time::timeout(std::time::Duration::from_millis(200), notify.notified())
+				.await
+		});
+		let fired = waiter.await.unwrap();
+		assert!(fired.is_err(), "a disarmed, already-removed guard must not fire pending_changed again");
+	}
+
+	/// Backstop for clients that vanish without the TCP connection noticing
+	/// (device sleeps, WiFi drops, a NAT keeps the socket open). Reading
+	/// `pending_clients()` should sweep anything older than
+	/// `PENDING_CLIENT_TTL` and signal the change.
+	#[tokio::test]
+	async fn a_stale_pending_client_expires_and_signals() {
+		let m = manager();
+		m.add_pending("F00D".into(), "pem".into(), salt(), None, None);
+
+		{
+			let mut inner = m.pending_clients.write().unwrap();
+			let client = inner.get_mut("F00D").unwrap();
+			client.created_at = Instant::now() - PENDING_CLIENT_TTL - Duration::from_secs(1);
+		}
+
+		let notify = m.pending_changed();
+		let waiter = tokio::spawn(async move { notify.notified().await });
+		tokio::task::yield_now().await;
+
+		assert!(m.pending_clients().is_empty(), "stale pending client should have been expired");
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+			.await
+			.expect("pending_changed did not fire within 1s")
+			.unwrap();
+	}
+
+	/// A pending client well within the TTL must not be swept.
+	#[tokio::test]
+	async fn a_fresh_pending_client_is_not_expired() {
+		let m = manager();
+		m.add_pending("C0DE".into(), "pem".into(), salt(), None, None);
+		assert_eq!(m.pending_clients().len(), 1, "a fresh client must not be expired");
 	}
 }

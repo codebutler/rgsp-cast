@@ -10,6 +10,7 @@ use hyper::{
 
 use crate::ShutdownReason;
 use crate::clients::ClientManager;
+use crate::clients::PendingClientGuard;
 use crate::webserver::bad_request;
 
 /// Extract a required query parameter, or return a 400 bad-request response.
@@ -156,6 +157,14 @@ async fn get_server_cert(
 
 	let pin_notifier = client_manager.add_pending(unique_id.clone(), client_pem, salt, device_name, peer_ip);
 
+	// Guards this await: if the client disconnects (Moonlight quit, network
+	// drop) before a PIN arrives, hyper cancels this handler future, this
+	// guard drops with it, and the pending entry is removed immediately
+	// instead of waiting on `PENDING_CLIENT_TTL`. Disarmed below once a PIN
+	// is actually received, since pairing then continues over further
+	// requests and only `check_client_pairing_secret` should remove it.
+	let guard = PendingClientGuard::new(client_manager.clone(), unique_id.clone());
+
 	// The desktop notification that offered to open the PIN page needed
 	// notify-rust and open; log the URL instead.
 	if let Some(local_address) = local_address {
@@ -165,7 +174,9 @@ async fn get_server_cert(
 	}
 
 	tokio::select! {
-		_ = pin_notifier.notified() => {},
+		_ = pin_notifier.notified() => {
+			guard.disarm();
+		},
 		_ = shutdown.wait_shutdown_triggered() => {
 			tracing::info!("Shutdown triggered, aborting pairing.");
 			return bad_request("Server is shutting down.".to_string());
