@@ -166,6 +166,14 @@ fn main() -> std::process::ExitCode {
     };
 
     let outcome = runtime.block_on(serve(config, &control));
+    // Signal the control socket's server task to stop *before* tearing down
+    // the runtime below -- that task only exists to receive this signal
+    // while the runtime is still alive, so calling `stop()` after
+    // `shutdown_timeout` (as this used to) would find nothing left
+    // listening: a no-op whose `Err` gets silently discarded. Ordered here,
+    // it actually asks the RPC server to wind down, and `shutdown_timeout`
+    // then gets to wait for that to happen instead of just aborting it.
+    let _ = control_socket.stop();
     // The hardware loops run as blocking tasks, and dropping a `Runtime`
     // waits for those to finish. A capture loop parked in ALSA or the Cedar
     // driver must not delay restoring the speaker, so give them a moment and
@@ -182,7 +190,6 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     };
-    let _ = control_socket.stop();
     shutdown(cast_sink, pidfile, code)
 }
 
