@@ -208,6 +208,23 @@ impl Ui {
         }
     }
 
+    /// Draw the battery/WiFi/Bluetooth status pill every NextUI screen
+    /// carries in its top-right corner (`GFX_blitHardwareGroup`,
+    /// `api.h:402`). Call once per frame, right after `begin()` and before
+    /// any other drawing — the same position `clock.c:254` uses.
+    /// `show_setting = 0` is the idle case: `GFX_blitHardwareGroup`
+    /// (`api.c:2300`) only switches to a brightness/volume/colortemp
+    /// indicator when `show_setting` names one; `0` isn't a valid
+    /// `IndicatorType`, so it falls through to the battery/wifi/bt/clock
+    /// pill every screen shows outside of actively adjusting a hardware
+    /// setting — which neither of ours ever does.
+    pub fn hardware_group(&mut self) {
+        // SAFETY: screen is valid for the lifetime of `self`.
+        unsafe {
+            sys::GFX_blitHardwareGroup(self.screen, 0);
+        }
+    }
+
     /// Draw a page title at the top of the screen.
     pub fn header(&mut self, title: &str) {
         let pad = sys::scale1(PADDING);

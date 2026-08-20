@@ -112,6 +112,7 @@ impl Home {
     }
 
     pub fn draw(&self, ui: &mut Ui, state: &CastState, connected: bool) {
+        ui.hardware_group();
         ui.header("Cast");
 
         let status = Self::status_text(state, connected);
