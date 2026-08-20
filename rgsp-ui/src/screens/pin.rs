@@ -109,8 +109,7 @@ impl Pin {
         // digits, so it belongs near them, centred to match the digit
         // group's own alignment.
         if let Some(err) = &self.error {
-            let y = ui.pin_error_y();
-            ui.centered_text(err, y);
+            ui.pin_error(err);
         }
         ui.hints(&[("A", "Submit"), ("B", "Back")]);
     }

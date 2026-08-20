@@ -151,22 +151,25 @@ fn pin_digit_y(screen_h: i32) -> i32 {
     (screen_h - sys::scale1(sys::PILL_SIZE as i32) - sys::scale1(DIGIT_HEIGHT)) / 2
 }
 
-/// Vertical position for the PIN screen's error line, in scaled pixels:
-/// below the cursor underline — with a deliberate `scale1(PADDING)` gap
-/// under it, not jammed against it — and (by construction, checked in
-/// tests) above [`bottom_band_top`]. `underline_h` is `ASSET_UNDERLINE`'s
-/// real height ([`Ui::underline_height`]), not guessed: the bar's asset
-/// could be a different height than the digit text, and this must clear
+/// The vertical band reserved for the PIN screen's error line, as
+/// `(top, height)`: from below the cursor underline — with a deliberate
+/// `scale1(PADDING)` gap under it, not jammed against it — down to
+/// [`bottom_band_top`]. A band, not a single `y`, because
+/// [`Ui::pin_error`] hands this straight to `GFX_blitMessage`, which
+/// centres *within* whatever rect it's given (`api.c:2130`: `y +=
+/// (dst_rect->h - rendered_height) / 2`) — there is no single "the" y to
+/// pick here, so this hands over the whole band and lets NextUI's own
+/// primitive do the centring. `underline_h` is `ASSET_UNDERLINE`'s real
+/// height ([`Ui::underline_height`]), not guessed: the bar's asset could be
+/// a different height than the digit text, and the band's top must clear
 /// whichever it actually is, the same reasoning [`header_max_width`]'s
 /// `chrome_width` parameter uses for the status pill.
-fn pin_error_y(screen_h: i32, underline_h: i32) -> i32 {
+fn pin_error_band(screen_h: i32, underline_h: i32) -> (i32, i32) {
     let underline_y = pin_digit_y(screen_h) + sys::scale1(CURSOR_GAP);
-    let y = underline_y + underline_h + sys::scale1(PADDING);
-    debug_assert!(
-        y < bottom_band_top(screen_h),
-        "PIN error line would overlap the reserved bottom hint-bar band"
-    );
-    y
+    let top = underline_y + underline_h + sys::scale1(PADDING);
+    let bottom = bottom_band_top(screen_h);
+    debug_assert!(bottom > top, "PIN error band collapsed: nothing left to draw into");
+    (top, bottom - top)
 }
 
 /// The open NextUI display, and everything acquired to open it.
@@ -450,24 +453,37 @@ impl Ui {
         rect.h
     }
 
-    /// Vertical position for the PIN screen's error line — see
-    /// [`pin_error_y`] for the geometry. Pass this to [`Ui::centered_text`].
-    pub fn pin_error_y(&self) -> i32 {
-        pin_error_y(self.h, self.underline_height())
-    }
-
-    /// Draw `text` centred horizontally at `y`, truncated to fit within
-    /// `scale1(PADDING)` of margin on each side of the screen. A small
-    /// primitive of its own, not [`Ui::row`]: `row()` draws full-width list
-    /// furniture — a left-aligned label, an optional right-aligned value —
-    /// which is the wrong shape for a short standalone message like the PIN
-    /// screen's error line.
-    pub fn centered_text(&mut self, text: &str, y: i32) {
-        let pad = sys::scale1(PADDING);
-        let text = self.truncate(text, self.w - pad * 2);
-        let width = self.text_width(&text);
-        let x = (self.w - width) / 2;
-        self.blit_text(&text, x, y, COLOR_WHITE);
+    /// Draw the PIN screen's error line with NextUI's own `GFX_blitMessage`
+    /// (`api.h:400`) — the primitive NextUI itself uses for exactly this: a
+    /// short status message centred in a reserved region, e.g.
+    /// `ledcontrol.c:262-283`'s `GFX_blitMessage(font.large, "This device
+    /// has no RGB lights.", screen, &(SDL_Rect){0, 0, screen->w,
+    /// screen->h})`. It centres both horizontally and vertically within the
+    /// rect it's given ([`pin_error_band`] computes ours) and *wraps*
+    /// text too wide for it rather than truncating — unlike `row()`'s or
+    /// `header()`'s truncation, this relies on the caller only ever passing
+    /// short, app-authored text. That is true here: PIN rejection messages
+    /// (`"PIN rejected"`, `"Not ready yet, try again"`, `"Connection
+    /// lost"`, `"Not connected"`) are fixed constants in `pin.rs`, never a
+    /// caller-supplied string like a device name or address — the same
+    /// distinction that ruled `GFX_blitText`/`GFX_sizeText` out for
+    /// `header()`/`row()`'s unbounded labels but does not apply to this
+    /// call site.
+    pub fn pin_error(&mut self, text: &str) {
+        let (y, h) = pin_error_band(self.h, self.underline_height());
+        let mut rect = SDL_Rect { x: 0, y, w: self.w, h };
+        let Ok(cstr) = CString::new(text) else {
+            return; // embedded NUL; nothing sane to draw
+        };
+        // SAFETY: font.large is populated by GFX_init before any Ui
+        // exists; rect is derived from self.w/self.h so it lies within the
+        // panel. GFX_blitMessage's `char*` parameter is not const-correct
+        // in the C header, but its implementation (api.c:2106) only ever
+        // reads through it (strchr, strncpy *from* it) — it never writes,
+        // so casting away const here does not create real mutation.
+        unsafe {
+            sys::GFX_blitMessage(sys::font.large, cstr.as_ptr().cast_mut(), self.screen, &mut rect);
+        }
     }
 
     /// Draw the button-hint bar, e.g. `[("A", "OK"), ("B", "BACK")]`.
@@ -648,37 +664,37 @@ mod tests {
     }
 
     #[test]
-    fn pin_error_y_lands_below_the_cursor_underline_and_above_the_bottom_band() {
+    fn pin_error_band_sits_between_the_underline_and_the_bottom_band() {
         // A plausible ASSET_UNDERLINE height -- a thin bar, not a real
         // measurement (this test runs without a display). What matters is
-        // that the error line clears whatever the real one turns out to
-        // be, and stays clear of the hint bar's reserved band -- pinning
-        // both collisions the owner actually hit on hardware at once.
+        // that the band clears whatever the real one turns out to be, and
+        // stays clear of the hint bar's reserved band -- pinning both
+        // collisions the owner actually hit on hardware at once.
         let screen_h = 480;
         let underline_h = 4;
+        let underline_bottom = pin_digit_y(screen_h) + crate::sys::scale1(CURSOR_GAP) + underline_h;
 
-        let underline_y = pin_digit_y(screen_h) + crate::sys::scale1(CURSOR_GAP);
-        let error_y = pin_error_y(screen_h, underline_h);
+        let (top, height) = pin_error_band(screen_h, underline_h);
         assert!(
-            error_y > underline_y + underline_h,
-            "error line ({error_y}) must sit below the underline's bottom edge ({})",
-            underline_y + underline_h
+            top > underline_bottom,
+            "band top ({top}) must sit below the underline's bottom edge ({underline_bottom})"
         );
-        assert!(
-            error_y < bottom_band_top(screen_h),
-            "error line ({error_y}) must clear the reserved bottom band ({})",
-            bottom_band_top(screen_h)
+        assert_eq!(
+            top + height,
+            bottom_band_top(screen_h),
+            "band bottom must land exactly at the reserved bottom band, not short of or past it"
         );
     }
 
     #[test]
-    fn pin_error_y_clears_a_taller_underline_by_the_same_margin() {
+    fn pin_error_band_shrinks_exactly_as_the_underline_grows() {
         // Same reasoning as header_max_width's status-pill test: the gap
         // below the underline must track its real height exactly, not a
         // number that happened to work for one asset size.
         let screen_h = 480;
-        let thin = pin_error_y(screen_h, 4);
-        let thick = pin_error_y(screen_h, 12);
-        assert_eq!(thick - thin, 12 - 4);
+        let (thin_top, thin_h) = pin_error_band(screen_h, 4);
+        let (thick_top, thick_h) = pin_error_band(screen_h, 12);
+        assert_eq!(thick_top - thin_top, 12 - 4);
+        assert_eq!(thin_h - thick_h, 12 - 4);
     }
 }
