@@ -1,0 +1,27 @@
+rgsp-ui/src/screens/mod.rs
+  s_630e93546bad55::t_4f0275c164cd9d 6
+rgsp-ui/tests/rpc.rs
+  s_630e93546bad55::t_4f0275c164cd9d 94,123,163-179,220-221,227-228
+rgsp-ui/src/main.rs
+  s_630e93546bad55::t_4f0275c164cd9d 7,54-58,129-133,144-156,184-192,194-196,201-235,248
+rgsp-ui/src/screens/pairing.rs
+  s_630e93546bad55::t_4f0275c164cd9d 1-53
+rgsp-ui/src/rpc.rs
+  s_630e93546bad55::t_4f0275c164cd9d 69-75,103-109,112-116,142,173-180,182-190,192-195,197-228,230-252,259,269
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "c7e7a458e85b72ca5f21d79f93115cb1370bce4f",
+  "prompts": {},
+  "sessions": {
+    "s_630e93546bad55": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5b8377dc-bc0f-474e-b555-c640aee7ad2e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
