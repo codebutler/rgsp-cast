@@ -133,6 +133,42 @@ fn row_y(index: i32) -> i32 {
     header_band_height() + sys::scale1(sys::PILL_SIZE as i32) * index
 }
 
+/// The top of the reserved bottom band every screen's hint bar
+/// ([`Ui::hints`]) occupies, in scaled pixels — nothing should be drawn
+/// below this. NextUI's own comment names it the mirror image of
+/// [`header_band_height`]'s top band: `nextui.c:2712-2714`'s `"bottom pill
+/// area: BUTTON_MARGIN + PILL_SIZE + PADDING"`, reserved from the bottom
+/// edge. Composed from the same named constants, not hardcoded.
+fn bottom_band_top(screen_h: i32) -> i32 {
+    screen_h - sys::scale1(sys::BUTTON_MARGIN as i32 + sys::PILL_SIZE as i32 + PADDING)
+}
+
+/// Vertical origin of the PIN digit row, in scaled pixels. See
+/// [`Ui::pin`]'s doc comment for the derivation from `clock.c`'s formula. A
+/// free function, not a method, so [`pin_error_y`] can share it and both
+/// stay unit-testable without an open display.
+fn pin_digit_y(screen_h: i32) -> i32 {
+    (screen_h - sys::scale1(sys::PILL_SIZE as i32) - sys::scale1(DIGIT_HEIGHT)) / 2
+}
+
+/// Vertical position for the PIN screen's error line, in scaled pixels:
+/// below the cursor underline — with a deliberate `scale1(PADDING)` gap
+/// under it, not jammed against it — and (by construction, checked in
+/// tests) above [`bottom_band_top`]. `underline_h` is `ASSET_UNDERLINE`'s
+/// real height ([`Ui::underline_height`]), not guessed: the bar's asset
+/// could be a different height than the digit text, and this must clear
+/// whichever it actually is, the same reasoning [`header_max_width`]'s
+/// `chrome_width` parameter uses for the status pill.
+fn pin_error_y(screen_h: i32, underline_h: i32) -> i32 {
+    let underline_y = pin_digit_y(screen_h) + sys::scale1(CURSOR_GAP);
+    let y = underline_y + underline_h + sys::scale1(PADDING);
+    debug_assert!(
+        y < bottom_band_top(screen_h),
+        "PIN error line would overlap the reserved bottom hint-bar band"
+    );
+    y
+}
+
 /// The open NextUI display, and everything acquired to open it.
 ///
 /// Every field the constructor can fail after setting is tracked, so `Drop`
@@ -355,18 +391,18 @@ impl Ui {
     /// monospaced digit cells with no boxes behind them, and the selected
     /// digit marked by an underline beneath it (`ASSET_UNDERLINE`), not a
     /// filled pill behind it.
+    ///
+    /// [`pin_digit_y`] (this call's `y`) mirrors clock.c:265's `y =
+    /// SCALE1(((FIXED_HEIGHT/FIXED_SCALE - PILL_SIZE - DIGIT_HEIGHT)/2))`,
+    /// which can't be ported literally: `FIXED_HEIGHT` is a runtime
+    /// expression on h700 (see `PADDING` above) that bindgen cannot emit.
+    /// `new()` already proved `self.h == FIXED_HEIGHT` for every `Ui` that
+    /// exists, so `scale1(FIXED_HEIGHT/FIXED_SCALE) == self.h` exactly, and
+    /// `scale1` is linear — distributing it over the subtraction gives the
+    /// identical `y` without ever naming `FIXED_HEIGHT`.
     pub fn pin(&mut self, digits: &[u8; 4], cursor: usize) {
         let cell_w = sys::scale1(DIGIT_WIDTH);
-
-        // clock.c:265's `y = SCALE1(((FIXED_HEIGHT/FIXED_SCALE - PILL_SIZE -
-        // DIGIT_HEIGHT)/2))` can't be ported literally: FIXED_HEIGHT is a
-        // runtime expression on h700 (see PADDING above) that bindgen
-        // cannot emit. `new()` already proved self.h == FIXED_HEIGHT for
-        // every `Ui` that exists, so `scale1(FIXED_HEIGHT/FIXED_SCALE) ==
-        // self.h` exactly, and scale1 is linear — distributing it over the
-        // subtraction gives the identical y without ever naming
-        // FIXED_HEIGHT.
-        let y = (self.h - sys::scale1(sys::PILL_SIZE as i32) - sys::scale1(DIGIT_HEIGHT)) / 2;
+        let y = pin_digit_y(self.h);
         let x0 = (self.w - digits.len() as i32 * cell_w) / 2;
 
         for (i, &digit) in digits.iter().enumerate() {
@@ -396,6 +432,42 @@ impl Ui {
         unsafe {
             sys::GFX_blitPill(sys::ASSET_UNDERLINE as i32, self.screen, &mut rect);
         }
+    }
+
+    /// `ASSET_UNDERLINE`'s real height in pixels, read from the asset
+    /// itself rather than guessed (`GFX_assetRect`, `api.h:439`) — the same
+    /// reasoning as `hardware_group()`'s return value: a hand-picked number
+    /// here could silently go stale if the asset ever changes, where
+    /// reading it cannot.
+    fn underline_height(&self) -> i32 {
+        let mut rect = SDL_Rect { x: 0, y: 0, w: 0, h: 0 };
+        // SAFETY: GFX_assetRect takes no surface — it only reads the
+        // `asset_rects` table `GFX_init` already populated before any `Ui`
+        // exists. ASSET_UNDERLINE is a real `ASSET_*` constant.
+        unsafe {
+            sys::GFX_assetRect(sys::ASSET_UNDERLINE as i32, &mut rect);
+        }
+        rect.h
+    }
+
+    /// Vertical position for the PIN screen's error line — see
+    /// [`pin_error_y`] for the geometry. Pass this to [`Ui::centered_text`].
+    pub fn pin_error_y(&self) -> i32 {
+        pin_error_y(self.h, self.underline_height())
+    }
+
+    /// Draw `text` centred horizontally at `y`, truncated to fit within
+    /// `scale1(PADDING)` of margin on each side of the screen. A small
+    /// primitive of its own, not [`Ui::row`]: `row()` draws full-width list
+    /// furniture — a left-aligned label, an optional right-aligned value —
+    /// which is the wrong shape for a short standalone message like the PIN
+    /// screen's error line.
+    pub fn centered_text(&mut self, text: &str, y: i32) {
+        let pad = sys::scale1(PADDING);
+        let text = self.truncate(text, self.w - pad * 2);
+        let width = self.text_width(&text);
+        let x = (self.w - width) / 2;
+        self.blit_text(&text, x, y, COLOR_WHITE);
     }
 
     /// Draw the button-hint bar, e.g. `[("A", "OK"), ("B", "BACK")]`.
@@ -573,5 +645,40 @@ mod tests {
         let narrow = header_max_width(screen_w, 60);
         let wide = header_max_width(screen_w, 260);
         assert_eq!(narrow - wide, 260 - 60);
+    }
+
+    #[test]
+    fn pin_error_y_lands_below_the_cursor_underline_and_above_the_bottom_band() {
+        // A plausible ASSET_UNDERLINE height -- a thin bar, not a real
+        // measurement (this test runs without a display). What matters is
+        // that the error line clears whatever the real one turns out to
+        // be, and stays clear of the hint bar's reserved band -- pinning
+        // both collisions the owner actually hit on hardware at once.
+        let screen_h = 480;
+        let underline_h = 4;
+
+        let underline_y = pin_digit_y(screen_h) + crate::sys::scale1(CURSOR_GAP);
+        let error_y = pin_error_y(screen_h, underline_h);
+        assert!(
+            error_y > underline_y + underline_h,
+            "error line ({error_y}) must sit below the underline's bottom edge ({})",
+            underline_y + underline_h
+        );
+        assert!(
+            error_y < bottom_band_top(screen_h),
+            "error line ({error_y}) must clear the reserved bottom band ({})",
+            bottom_band_top(screen_h)
+        );
+    }
+
+    #[test]
+    fn pin_error_y_clears_a_taller_underline_by_the_same_margin() {
+        // Same reasoning as header_max_width's status-pill test: the gap
+        // below the underline must track its real height exactly, not a
+        // number that happened to work for one asset size.
+        let screen_h = 480;
+        let thin = pin_error_y(screen_h, 4);
+        let thick = pin_error_y(screen_h, 12);
+        assert_eq!(thick - thin, 12 - 4);
     }
 }

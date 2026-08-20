@@ -103,10 +103,15 @@ impl Pin {
     pub fn draw(&self, ui: &mut Ui) {
         let chrome_w = ui.hardware_group();
         ui.header(&format!("Pair with {}", self.label()), chrome_w);
-        if let Some(err) = &self.error {
-            ui.row(err, None, 0, false);
-        }
         ui.pin(&self.digits, self.cursor);
+        // Below the cursor underline, not `row()`'s left-aligned list-row
+        // slot at the top of the screen -- the error is feedback about the
+        // digits, so it belongs near them, centred to match the digit
+        // group's own alignment.
+        if let Some(err) = &self.error {
+            let y = ui.pin_error_y();
+            ui.centered_text(err, y);
+        }
         ui.hints(&[("A", "Submit"), ("B", "Back")]);
     }
 }
