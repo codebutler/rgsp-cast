@@ -58,8 +58,8 @@ pub trait ControlApi {
 #[rpc(server)]
 pub trait PinApi {
     // `param_kind = map`: the spec's UI client sends `{"id":..., "pin":...}`,
-    // a JSON object. The server-side decoder jsonrpsee 0.26 generates
-    // actually branches on `params.is_object()` at request time regardless
+    // a JSON object. The server-side decoder that jsonrpsee 0.26 generates
+    // actually branches on `params.is_object()` at request time, regardless
     // of this attribute (verified: `tests/control.rs` passes the object
     // shape even with the attribute removed), so this alone doesn't gate
     // acceptance. It's kept because `param_kind` *does* control what shape
