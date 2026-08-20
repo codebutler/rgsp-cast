@@ -45,12 +45,18 @@ const LOOPBACK_CAPTURE_DEVICE: &str = "hw:Loopback,1,0";
 /// card rather than living on the rootfs.
 const DEFAULT_USERDATA: &str = "/mnt/SDCARD/.userdata/h700";
 
-/// The on-device UI's JSON-RPC control socket. `ControlHandle::serve` unlinks
-/// this path before binding, so it must be served *after* the pidfile is
-/// held — the flock is what makes a stale path from a dead daemon safe to
-/// unlink, and what stops a second, losing instance from unlinking a live
-/// one's socket out from under it.
-const CONTROL_SOCKET: &str = "/tmp/rgsp/control.sock";
+/// Where the pidfile and the UI's control socket live when `RGSP_RUN_DIR`
+/// says nothing. Every other piece of the tree — `pak/launch.sh`, the
+/// `pak/hooks/*` scripts, and `rgsp-ui` — reads `RGSP_RUN_DIR` with this same
+/// fallback, so the daemon has to as well: a UI that spawns us with a custom
+/// `RGSP_RUN_DIR` then probes that directory for our socket, and a daemon
+/// that ignored the variable would bind somewhere the UI never looks.
+const DEFAULT_RUN_DIR: &str = "/tmp/rgsp";
+
+/// The directory holding the pidfile and the control socket.
+fn run_dir() -> PathBuf {
+    std::env::var_os("RGSP_RUN_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_RUN_DIR))
+}
 
 /// How often to check whether a Moonlight client has started a session.
 /// `SessionManager` has no "session started" notification; the senders simply
@@ -101,7 +107,8 @@ fn main() -> std::process::ExitCode {
     // control socket, which unlinks whatever is already at that path before
     // it binds. Without the pidfile held first, a losing second instance
     // could unlink a first instance's *live* socket out from under it.
-    let pid_path = PathBuf::from("/tmp/rgsp/daemon.pid");
+    let run_dir = run_dir();
+    let pid_path = run_dir.join("daemon.pid");
     let pidfile = match PidFile::acquire(&pid_path) {
         Ok(p) => p,
         Err(e) => {
@@ -142,9 +149,15 @@ fn main() -> std::process::ExitCode {
     };
 
     // Step 3: serve the control socket, now that the pidfile guarantees we're
-    // the only instance that could be unlinking a stale path at CONTROL_SOCKET.
+    // the only instance that could be unlinking a stale path there.
+    // `ControlHandle::serve` unlinks the path before binding, so it must run
+    // *after* the pidfile is held — the flock is what makes a stale path from
+    // a dead daemon safe to unlink, and what stops a second, losing instance
+    // from unlinking a live one's socket out from under it. The run dir
+    // itself already exists: `PidFile::acquire` created it.
+    let control_socket_path = run_dir.join("control.sock");
     let control = ControlHandle::new();
-    let control_socket = match runtime.block_on(control.clone().serve(CONTROL_SOCKET)) {
+    let control_socket = match runtime.block_on(control.clone().serve(&control_socket_path.to_string_lossy())) {
         Ok(handle) => handle,
         Err(e) => {
             tracing::error!("failed to serve the control socket: {e:#}");
