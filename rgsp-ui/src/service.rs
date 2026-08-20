@@ -24,6 +24,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -107,6 +108,18 @@ impl Service {
     /// stderr go to the log) so the daemon can never block reading from a
     /// terminal that outlives this call.
     ///
+    /// Every descriptor above stderr is closed in the child before `exec`
+    /// (see [`close_inherited_fds`]). The redirections in the script above
+    /// only cover fds 0/1/2; everything else is inherited straight through
+    /// both forks. Rust marks the descriptors *Rust* opens `CLOEXEC`, but the
+    /// ones that matter here are opened by C — `GFX_init`/SDL/msettings, via
+    /// [`crate::ui::Ui`] — including `/dev/fb0`. A daemon that inherited the
+    /// framebuffer would keep holding it after this pak exits, and this
+    /// console arbitrates the display by process lifetime alone: a stray
+    /// holder corrupts the launcher until the device is rebooted. That is the
+    /// exact failure this whole feature exists to prevent, so it must not be
+    /// reintroduced by the feature itself.
+    ///
     /// Checks that `bin` exists and is executable before spawning anything,
     /// so a broken install (missing or non-executable `rgsp-host`) fails
     /// immediately with its own message rather than looking identical to "it
@@ -123,13 +136,22 @@ impl Service {
         }
 
         let log = self.run_dir.join("daemon.log");
-        let status = Command::new("sh")
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
             .arg(r#""$1" </dev/null >"$2" 2>&1 &"#)
             .arg("sh") // becomes $0 inside the -c script
             .arg(&bin) // $1
             .arg(&log) // $2
-            .env("RGSP_RUN_DIR", &self.run_dir)
+            .env("RGSP_RUN_DIR", &self.run_dir);
+        // SAFETY: `pre_exec` runs between `fork` and `exec`, where only
+        // async-signal-safe calls are legal. `close_range(2)`, `close(2)` and
+        // `getrlimit(2)` are all syscalls with no allocation, no locks and no
+        // libc state of their own, so this closure is safe to run there.
+        unsafe {
+            command.pre_exec(close_inherited_fds);
+        }
+        let status = command
             .status()
             .with_context(|| format!("launching {}", bin.display()))?;
         if !status.success() {
@@ -262,4 +284,57 @@ impl Service {
         }
         Err(err).with_context(|| format!("probing the lock on {}", pidfile.display()))
     }
+}
+
+/// Closes every file descriptor above stderr in the freshly forked child,
+/// immediately before `exec`.
+///
+/// Runs inside [`std::os::unix::process::CommandExt::pre_exec`], i.e. in a
+/// forked child that has not `exec`ed yet, so it may only use
+/// async-signal-safe calls: syscalls, no allocation, no `/proc` walking.
+///
+/// `close_range(2)` does the whole span in one call, but it needs Linux 5.9+
+/// and this handheld runs an old vendor kernel, so an `ENOSYS` (or any other)
+/// failure falls back to closing one fd at a time up to `RLIM_NOFILE`. Errors
+/// from the individual `close`s are ignored on purpose: most of the range is
+/// simply not open, and `EBADF` is the expected answer for those.
+///
+/// Known cost: this also closes the `CLOEXEC` pipe `std` uses to report a
+/// failed `exec` back to the parent, so a child that fails to exec can look
+/// like a successful spawn. Acceptable here — [`Service::start`] does not
+/// trust the spawn's exit status as evidence the daemon is up; it polls the
+/// control socket until its own deadline, which catches "never came up"
+/// regardless of why.
+fn close_inherited_fds() -> std::io::Result<()> {
+    /// stdin/stdout/stderr are redirected by the launch script itself and
+    /// must survive.
+    const LOWEST: libc::c_uint = 3;
+
+    // SAFETY: a bare syscall with no memory effects; failure is reported
+    // through the return value and handled below.
+    if unsafe { libc::close_range(LOWEST, libc::c_uint::MAX, 0) } == 0 {
+        return Ok(());
+    }
+
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: `getrlimit(2)` writes exactly one `rlimit` into the pointer we
+    // hand it, which points at our own stack slot.
+    let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } == 0 {
+        // SAFETY: `getrlimit` returned 0, so it initialised the value.
+        let soft = unsafe { limit.assume_init() }.rlim_cur;
+        // `RLIM_INFINITY` (and anything absurd) would turn this into a
+        // multi-billion-iteration loop between fork and exec. Cap it: a
+        // process cannot have open descriptors above its own soft limit, and
+        // 4096 is far above anything this UI opens.
+        if soft == libc::RLIM_INFINITY || soft > 4096 { 4096 } else { soft as libc::c_int }
+    } else {
+        4096
+    };
+
+    for fd in LOWEST as libc::c_int..max {
+        // SAFETY: `close(2)` on a descriptor that may or may not be open;
+        // `EBADF` for the ones that are not is expected and ignored.
+        unsafe { libc::close(fd) };
+    }
+    Ok(())
 }

@@ -65,6 +65,21 @@ fn main() -> anyhow::Result<()> {
     let socket_path = run_dir.join("control.sock");
     let service = Service::new(pak_dir(), run_dir);
 
+    // `scripts/smoke-ui.sh`'s hook. There is no input injection on the
+    // device, so the only way to exercise `Service::start` from a process
+    // that is genuinely holding /dev/fb0 -- which is the whole point, since
+    // the leak being guarded against is the UI's own display descriptors
+    // being inherited by the daemon -- is a non-interactive entry point that
+    // brings the display up first (`Ui::new()` above, already done), starts
+    // the daemon, and exits. The daemon outlives this process by design; if
+    // it kept an fd on the framebuffer, the smoke test's fb0 assertion is
+    // what catches it.
+    if std::env::args().any(|a| a == "--smoke-start-daemon") {
+        tracing::info!("--smoke-start-daemon: starting the daemon, then exiting");
+        service.start()?;
+        return Ok(());
+    }
+
     // `Control` has no reconnect: a dropped or never-established connection
     // is retried below by constructing a fresh one, once per frame, rather
     // than waiting on this one to heal itself (it never will).

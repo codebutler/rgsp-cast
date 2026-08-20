@@ -12,6 +12,17 @@
 #      spawns -- a process left holding the framebuffer corrupts the
 #      launcher until reboot.
 #
+#   4. The daemon rgsp-ui starts does not inherit the UI's framebuffer.
+#      rgsp-ui is re-run with --smoke-start-daemon (a non-interactive entry
+#      point that brings the display up, calls Service::start, and exits)
+#      because there is no input injection here to press A on the Home
+#      screen. rgsp-host outlives the UI by design, so if it inherited the
+#      UI's /dev/fb0 fd it would hold the framebuffer forever -- the exact
+#      corrupt-the-launcher-until-reboot failure this pak exists to prevent.
+#      Descriptors opened by C (GFX_init/SDL/msettings) carry no CLOEXEC,
+#      which is why this is not automatic; see the pre_exec in
+#      rgsp-ui/src/service.rs.
+#
 #      This is a before/after diff, not "only nextui.elf may hold it": on
 #      real hardware several unrelated boot daemons (wpa_supplicant,
 #      wpa_cli, rtk_hciattach, udhcpc, bluetoothd, bluealsa) already hold an
@@ -134,6 +145,21 @@ if ssh "$DEVICE" "kill -0 $UI_PID" 2>/dev/null; then
 fi
 echo "rgsp-ui exited"
 
+echo "== starting the daemon the way the UI does, from a process holding fb0 =="
+# --smoke-start-daemon stands in for pressing A on Home: there is no input
+# injection here. It runs *after* the interactive rgsp-ui above has exited,
+# because two processes drawing to fb0 at once is the failure this project
+# exists to prevent. RGSP_PAK_DIR is exported explicitly -- launch.sh sets it
+# for the interactive path, but this invocation bypasses launch.sh.
+if ! ssh "$DEVICE" "cd $PAKDIR && env $PAK_ENV RGSP_PAK_DIR=$PAKDIR \
+        LD_LIBRARY_PATH=$PAKDIR/lib/h700:/mnt/SDCARD/.system/h700/lib:/usr/lib:/usr/lib/aarch64-linux-gnu \
+        ./rgsp-ui --smoke-start-daemon"; then
+    echo "FAIL: rgsp-ui --smoke-start-daemon could not start rgsp-host"
+    ssh "$DEVICE" "tail -40 /tmp/rgsp/daemon.log" 2>/dev/null || true
+    exit 1
+fi
+echo "rgsp-host started and rgsp-ui exited"
+
 echo "== the assertion that matters: no NEW process holds /dev/fb0 =="
 # Diff against the baseline recorded before the pak ever ran, rather than
 # asserting a fixed allow-list -- see the file header for why a bare
@@ -159,12 +185,20 @@ fi
 # Belt-and-braces: name-check the offenders this test exists for, regardless
 # of the baseline. A prior smoke run that itself left something behind would
 # otherwise get grandfathered into BASELINE and silently mask a real leak.
-# rgsp-host is deliberately not checked here -- it may legitimately hold
-# fb0 one day if casting is active when this runs.
-NAMED_BAD=$(echo "$AFTER" | awk '$2 == "rgsp-ui" || $2 == "show2.elf"')
+# rgsp-host is checked too, and deliberately so: it is started above by the
+# UI, it outlives the pak, and it has no business ever touching /dev/fb0 --
+# it captures through the Cedar VE, not the framebuffer. An fd on fb0 here
+# could only be one it inherited from rgsp-ui, which is the leak.
+NAMED_BAD=$(echo "$AFTER" | awk '$2 == "rgsp-ui" || $2 == "rgsp-host" || $2 == "show2.elf"')
 if [ -n "$NAMED_BAD" ]; then
     echo "FAIL: known-offender process still holds /dev/fb0: $NAMED_BAD"
+    ssh "$DEVICE" "killall rgsp-host 2>/dev/null; true"
     exit 1
 fi
+
+# The daemon is meant to outlive the pak, so nothing above stops it. Leave
+# the device as this script found it.
+echo "== stopping the daemon this run started =="
+ssh "$DEVICE" "killall rgsp-host 2>/dev/null; true"
 
 echo "PASS: no new process is holding /dev/fb0 after the pak returned"

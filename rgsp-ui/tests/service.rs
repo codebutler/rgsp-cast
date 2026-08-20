@@ -345,3 +345,59 @@ fn start_fails_fast_when_the_binary_is_not_executable() {
         "a non-executable binary must not be reported as the generic accept-timeout: {message:?}"
     );
 }
+
+#[test]
+fn start_does_not_leak_inherited_descriptors_into_the_daemon() {
+    // The reproduction for the framebuffer leak. The UI's display
+    // descriptors are opened by C (`GFX_init`/SDL/msettings), so they carry
+    // no `FD_CLOEXEC` and are inherited through `sh`'s fork and the daemon's
+    // exec — the launch script only redirects fds 0/1/2. `/dev/fb0` held by
+    // a daemon that outlives the pak corrupts the launcher until reboot.
+    //
+    // Rust sets `FD_CLOEXEC` on everything it opens, so the marker below has
+    // to have it cleared explicitly to model a C-opened descriptor at all.
+    let (pak_dir, run_dir) = temp_dirs("start-closes-fds");
+    let marker_path = run_dir.join("inherited-marker");
+    let marker = std::fs::File::create(&marker_path).expect("create marker file");
+    let marker_fd = {
+        use std::os::unix::io::AsRawFd;
+        marker.as_raw_fd()
+    };
+    // SAFETY: `fcntl(2)` on a descriptor we own, clearing the close-on-exec
+    // flag so this file behaves like one opened by the C display code.
+    assert_eq!(unsafe { libc::fcntl(marker_fd, libc::F_SETFD, 0) }, 0, "clearing FD_CLOEXEC on the marker");
+
+    // Dumps what the daemon actually inherited before doing anything else,
+    // then binds the socket so `start()` can succeed and the test can read
+    // the dump knowing the spawn completed.
+    write_stub(
+        &pak_dir,
+        r#"#!/bin/sh
+echo $$ > "$RGSP_RUN_DIR/daemon.pid"
+for f in /proc/$$/fd/*; do readlink "$f"; done > "$RGSP_RUN_DIR/inherited-fds"
+exec python3 -c "
+import os, socket, signal
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(os.environ['RGSP_RUN_DIR'] + '/control.sock')
+s.listen(5)
+signal.pause()
+"
+"#,
+    );
+
+    let service = Service::new_with_timeouts(pak_dir, run_dir.clone(), Duration::from_secs(5), Duration::from_millis(300));
+    let result = service.start();
+    assert!(result.is_ok(), "start() must still succeed with the fds closed, got {result:?}");
+
+    let inherited = std::fs::read_to_string(run_dir.join("inherited-fds")).expect("stub never dumped its fds");
+    let marker_name = marker_path.to_string_lossy().to_string();
+    assert!(
+        !inherited.lines().any(|line| line == marker_name),
+        "the daemon inherited a non-CLOEXEC descriptor from the UI; on the device that is /dev/fb0:\n{inherited}"
+    );
+
+    let pid = wait_for_pidfile(&run_dir);
+    kill_quietly(pid);
+    drop(marker);
+}
+
