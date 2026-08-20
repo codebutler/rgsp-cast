@@ -29,7 +29,8 @@ pub struct CastState {
     pub pending: Vec<PendingEntry>,
 }
 
-/// Mirrors `rgsp_host::control::PinResult`.
+/// Mirrors `rgsp_host::control::PinResult`. `paired` is the real pairing
+/// outcome: the daemon waits for the handshake to finish before answering.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PinResult {
     pub paired: bool,
@@ -42,8 +43,12 @@ const SUBMIT_PIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// (`rgsp_host::control::PinApiServer::submit_pin`):
 /// - `-32000` "pairing not available" — the daemon's `ClientManager` isn't
 ///   wired up yet (its startup window). The caller should wait and retry.
-/// - `-32001` "unknown client or bad pin" — the daemon checked the id/pin
-///   and rejected it. The caller should have the user re-enter the PIN.
+/// - `-32001` — the pairing did not complete: either the id is one the
+///   daemon has never heard of, or the handshake failed to finish within
+///   the daemon's own pairing timeout, which is what a wrong PIN looks
+///   like from here (the daemon only learns a PIN was wrong two protocol
+///   steps after it was submitted, when the client's pairing secret fails
+///   to verify). The caller should have the user re-enter the PIN.
 ///
 /// A transport-level failure (dropped connection, timeout) is a third,
 /// separate case — it surfaces as `Err` from [`Control::submit_pin`], not as
