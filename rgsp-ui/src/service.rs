@@ -178,8 +178,10 @@ impl Service {
     /// SIGTERMs the pid recorded in the pidfile, then waits for the control
     /// socket to stop answering, up to `stop_timeout`.
     ///
-    /// A missing pidfile is treated as "already stopped" (`Ok(())`), not an
-    /// error: there is nothing to signal. A pidfile that exists but doesn't
+    /// A missing pidfile means there is nothing to signal — but that is not
+    /// the same as "already stopped", so it (like the unheld-lock case
+    /// below) goes through [`Self::confirm_not_serving`] rather than
+    /// returning `Ok(())` outright. A pidfile that exists but doesn't
     /// parse as a pid *is* an error — that's corruption, not "not running",
     /// and silently ignoring it would leave a live daemon signaled never.
     ///
@@ -193,7 +195,7 @@ impl Service {
         let pidfile = self.pidfile_path();
         let contents = match std::fs::read_to_string(&pidfile) {
             Ok(s) => s,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => return self.confirm_not_serving("there is no pidfile"),
             Err(e) => return Err(e).with_context(|| format!("reading {}", pidfile.display())),
         };
         let pid: libc::pid_t = contents
@@ -208,7 +210,7 @@ impl Service {
             // was never a daemon's pidfile in the first place. Either way
             // there is nothing here to signal, and `pid` is not trustworthy
             // enough to try.
-            return Ok(());
+            return self.confirm_not_serving("nobody holds the pidfile's lock");
         }
 
         // SAFETY: `kill(2)` with a caller-controlled pid and no other side
@@ -237,6 +239,27 @@ impl Service {
             }
             std::thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    /// The "already stopped" answer, but only once the socket agrees.
+    ///
+    /// Both of [`Service::stop`]'s early returns get here, and both reason
+    /// from the pidfile alone — it is missing, or nobody holds its lock.
+    /// Neither is proof the daemon is gone: the pidfile can be removed or
+    /// replaced while the daemon runs (`scripts/smoke-ui.sh` does exactly
+    /// that, and `PidFile::release` unlinks it too). Reporting `Ok` in that
+    /// state is the worst possible outcome for the UI — Home keeps showing
+    /// "Running", the hint keeps saying "A Stop", and pressing A does
+    /// nothing, forever. So if something is still serving the control
+    /// socket, say so loudly instead.
+    fn confirm_not_serving(&self, reason: &str) -> anyhow::Result<()> {
+        if self.socket_answers() {
+            anyhow::bail!(
+                "{reason}, but something is still answering on {} — refusing to report the daemon stopped",
+                self.socket_path().display(),
+            );
+        }
+        Ok(())
     }
 
     /// True if some process currently holds the exclusive `flock(2)` on

@@ -401,3 +401,40 @@ signal.pause()
     drop(marker);
 }
 
+#[test]
+fn stop_refuses_to_report_success_while_the_socket_still_answers() {
+    // An unheld lock -- here, no pidfile at all -- is not proof the daemon
+    // is gone: the pidfile can be removed or replaced while it runs
+    // (`scripts/smoke-ui.sh` does `rm -f` on it). Reporting `Ok` here leaves
+    // Home showing "Running" with an A-to-Stop hint that does nothing
+    // forever, so the socket gets the last word.
+    let (pak_dir, run_dir) = temp_dirs("stop-socket-still-answers");
+    let socket = run_dir.join("control.sock");
+    let mut listener = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import sys, socket, signal\ns = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\ns.bind(sys.argv[1])\ns.listen(5)\nprint('up', flush=True)\nsignal.pause()\n")
+        .arg(&socket)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn socket holder");
+    {
+        use std::io::BufRead;
+        let stdout = listener.stdout.take().expect("stdout");
+        let mut line = String::new();
+        std::io::BufReader::new(stdout).read_line(&mut line).expect("wait for the listener to bind");
+    }
+    assert!(!run_dir.join("daemon.pid").exists(), "this test is about the no-pidfile path");
+
+    let service = Service::new_with_timeouts(pak_dir, run_dir, Duration::from_secs(5), Duration::from_millis(300));
+    let result = service.stop();
+
+    let _ = listener.kill();
+    let _ = listener.wait();
+
+    let err = result.expect_err("stop() must not report success while something is still serving");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("still answering"),
+        "the error should name the live socket as the reason: {message:?}"
+    );
+}
